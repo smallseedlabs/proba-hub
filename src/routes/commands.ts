@@ -8,13 +8,19 @@ import { pool } from '../db/client.js';
 import type { CommandResult } from '../types.js';
 
 // Lazy-load brain to allow tests to change scenario via env var
-let processor: CommandProcessor | null = null;
+// Cache processor per scenario to allow test isolation
+let processorCache: Map<string, CommandProcessor> = new Map();
 
 function getProcessor(): CommandProcessor {
+  const scenario = config.brain.scenario;
+  let processor = processorCache.get(scenario);
+  
   if (!processor) {
-    const brain = new MockBrain(config.brain.scenario);
+    const brain = new MockBrain(scenario);
     processor = new CommandProcessor(brain);
+    processorCache.set(scenario, processor);
   }
+  
   return processor;
 }
 
