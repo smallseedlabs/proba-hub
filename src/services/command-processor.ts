@@ -135,19 +135,15 @@ export class CommandProcessor {
 
   private async getCommandEvents(client: PoolClient, commandId: string): Promise<Event[]> {
     const result = await client.query<Event>(
-      `SELECT id, user_id as "userId", seq, type, thread_id as "threadId",
-              payload, ui_payload_id as "uiPayloadId", fallback_text as "fallbackText",
-              created_at as "createdAt"
-       FROM events
-       WHERE id IN (
-         SELECT event_id FROM outbox WHERE id = (
-           SELECT MAX(id) FROM outbox WHERE id IN (
-             SELECT id FROM outbox WHERE created_at >= (
-               SELECT created_at FROM commands WHERE id = $1
-             )
-           )
-         )
-       )`,
+      `SELECT DISTINCT e.id, e.user_id as "userId", e.seq, e.type, e.thread_id as "threadId",
+              e.payload, e.ui_payload_id as "uiPayloadId", e.fallback_text as "fallbackText",
+              e.created_at as "createdAt"
+       FROM events e
+       JOIN outbox o ON e.id = o.event_id
+       WHERE o.created_at >= (
+         SELECT created_at FROM commands WHERE id = $1
+       )
+       ORDER BY e.seq ASC`,
       [commandId]
     );
 
