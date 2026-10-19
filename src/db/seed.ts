@@ -91,11 +91,17 @@ async function seed(): Promise<void> {
       'Seed data created successfully'
     );
 
+    // eslint-disable-next-line no-console
     console.log('\n=== Seed Data Created ===');
+    // eslint-disable-next-line no-console
     console.log(`Demo User ID: ${userId}`);
+    // eslint-disable-next-line no-console
     console.log(`Demo Email: ${demoEmail}`);
+    // eslint-disable-next-line no-console
     console.log(`Thread ID: ${threadId}`);
+    // eslint-disable-next-line no-console
     console.log(`Goal ID: ${goalId}`);
+    // eslint-disable-next-line no-console
     console.log('\nUse this email to login via POST /dev/login');
   } catch (error) {
     await client.query('ROLLBACK');

@@ -382,3 +382,5 @@ Apache License 2.0 © Small Seed Labs
 ---
 
 **Note**: This is a PUBLIC repository. Never commit secrets. Use `.env` for local development and secrets management for production.
+
+**TODO**: Switch `@smallseedlabs/proba-protocol` dependency to `#v0.1.2` once tagged (currently using cursor/add-prepare-script-3665 for CI).

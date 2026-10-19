@@ -34,6 +34,19 @@ export async function eventRoutes(fastify: FastifyInstance) {
   );
 }
 
+interface EventRow {
+  seq: number;
+  type: string;
+  thread_id?: string;
+  payload: unknown;
+  created_at: Date;
+  component?: string;
+  version?: string;
+  props?: unknown;
+  actions?: unknown;
+  fallback_text?: string;
+}
+
 async function handlePolling(
   userId: string,
   afterSeq: number,
@@ -56,32 +69,8 @@ async function handlePolling(
   const hasMore = result.rows.length > limit;
   const events = result.rows.slice(0, limit);
 
-  const envelopes: EventEnvelope[] = events.map((row) => {
-    const envelope: EventEnvelope = {
-      kind: 'event',
-      seq: row.seq,
-      type: row.type,
-      threadId: row.thread_id,
-      payload: row.payload,
-      at: row.created_at.toISOString(),
-    };
-
-    if (row.component) {
-      envelope.ui = {
-        component: row.component,
-        version: row.version,
-        props: row.props,
-      };
-      if (row.actions) {
-        (envelope.ui as any).actions = row.actions;
-      }
-    }
-
-    if (row.fallback_text) {
-      envelope.fallbackText = row.fallback_text;
-    }
-
-    return envelope;
+  const envelopes: EventEnvelope[] = events.map((row: EventRow) => {
+    return buildEventEnvelope(row);
   });
 
   const nextSeq = events.length > 0 ? events[events.length - 1].seq : afterSeq;
@@ -157,25 +146,26 @@ async function handleSSE(
   logger.info({ userId, lastSeq }, 'SSE connection established');
 }
 
-function buildEventEnvelope(row: any): EventEnvelope {
+function buildEventEnvelope(row: EventRow): EventEnvelope {
   const envelope: EventEnvelope = {
     kind: 'event',
     seq: row.seq,
-    type: row.type,
+    type: row.type as EventEnvelope['type'],
     threadId: row.thread_id,
     payload: row.payload,
     at: row.created_at.toISOString(),
   };
 
-  if (row.component) {
-    envelope.ui = {
+  if (row.component && row.version && row.props) {
+    const ui = {
       component: row.component,
       version: row.version,
       props: row.props,
     };
     if (row.actions) {
-      (envelope.ui as any).actions = row.actions;
+      Object.assign(ui, { actions: row.actions });
     }
+    envelope.ui = ui as EventEnvelope['ui'];
   }
 
   if (row.fallback_text) {

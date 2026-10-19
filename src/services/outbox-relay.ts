@@ -39,15 +39,16 @@ function startPublisher(): void {
           at: row.created_at.toISOString(),
         };
 
-        if (row.component) {
-          envelope.ui = {
+        if (row.component && row.version && row.props) {
+          const ui = {
             component: row.component,
             version: row.version,
             props: row.props,
           };
           if (row.actions) {
-            (envelope.ui as any).actions = row.actions;
+            Object.assign(ui, { actions: row.actions });
           }
+          envelope.ui = ui as EventEnvelope['ui'];
         }
 
         if (row.fallback_text) {

@@ -84,8 +84,8 @@ export class MockBrain extends BaseBrainPort {
         
         const outputs = step.outputs.map(output => {
           if (output.type === 'clarify' && 'expiresIn' in output) {
-            const { expiresIn, onExpire, ...rest } = output as Record<string, unknown>;
-            return rest as BrainOutput;
+            const { expiresIn: _expiresIn, onExpire: _onExpire, ...rest } = output as Record<string, unknown>;
+            return rest as unknown as BrainOutput;
           }
           return output;
         });

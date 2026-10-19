@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { commandEnvelopeSchema, isCommandEnvelope } from '@smallseedlabs/proba-protocol';
+import { commandEnvelopeSchema, type CommandEnvelope } from '@smallseedlabs/proba-protocol';
 import { CommandProcessor } from '../services/command-processor.js';
 import { MockBrain } from '../brain/mock-brain.js';
 import { config } from '../config.js';
@@ -22,22 +22,15 @@ export async function commandRoutes(fastify: FastifyInstance) {
       const validation = commandEnvelopeSchema.safeParse(body);
       if (!validation.success) {
         logger.warn({ error: validation.error }, 'Invalid command envelope');
+        const invalidBody = body as { clientMsgId?: string };
         return reply.code(202).send({
           status: 'rejected',
-          clientMsgId: (body as any)?.clientMsgId || 'unknown',
+          clientMsgId: invalidBody?.clientMsgId || 'unknown',
           reason: 'validation_error',
         });
       }
 
-      if (!isCommandEnvelope(body)) {
-        return reply.code(202).send({
-          status: 'rejected',
-          clientMsgId: (body as any)?.clientMsgId || 'unknown',
-          reason: 'invalid_envelope',
-        });
-      }
-
-      const envelope = body;
+      const envelope = validation.data as CommandEnvelope;
 
       if (envelope.threadId) {
         const threadCheck = await pool.query(

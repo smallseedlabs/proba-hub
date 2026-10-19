@@ -16,7 +16,7 @@ pool.on('error', (err) => {
   process.exit(-1);
 });
 
-export async function query<T extends pg.QueryResultRow = any>(
+export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   sql: string, 
   params?: unknown[]
 ): Promise<pg.QueryResult<T>> {

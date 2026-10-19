@@ -6,11 +6,13 @@ import { logger } from './logger.js';
 import { pool } from './db/client.js';
 import type { User } from './types.js';
 
-declare module 'fastify' {
-  interface FastifyRequest {
-    user?: User;
+declare module '@fastify/jwt' {
+  interface FastifyJWT {
+    user: User;
   }
-  
+}
+
+declare module 'fastify' {
   interface FastifyInstance {
     authenticate: (
       request: FastifyRequest,
@@ -43,19 +45,17 @@ fastify.decorate('authenticate', async function (request: FastifyRequest, reply:
       token = request.headers.authorization.substring(7);
     } else if (request.query && typeof request.query === 'object' && 'token' in request.query) {
       token = request.query.token as string;
-    } else if (request.cookies?.token) {
-      token = request.cookies.token;
     }
     
     if (!token) {
       return reply.code(401).send({ error: 'missing_token' });
     }
     
-    const decoded = fastify.jwt.verify(token) as { userId: string };
+    const payload = fastify.jwt.verify<{ userId: string }>(token);
     
     const result = await pool.query<User>(
       'SELECT id, email, name, created_at as "createdAt", updated_at as "updatedAt" FROM users WHERE id = $1',
-      [decoded.userId]
+      [payload.userId]
     );
     
     if (result.rows.length === 0) {

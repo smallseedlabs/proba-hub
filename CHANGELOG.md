@@ -42,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependencies
 
-- @smallseedlabs/proba-protocol v0.1.0
+- @smallseedlabs/proba-protocol from branch cursor/add-prepare-script-3665
+  - **TODO**: Switch to v0.1.2 tag once released
 
 ### Notes
 
