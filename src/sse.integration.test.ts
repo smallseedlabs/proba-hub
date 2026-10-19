@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
+import { toJsonb } from './db/jsonb.js';
 
 const app = await initializeApp({ startBackgroundJobs: true });
 
@@ -81,7 +82,7 @@ describe('SSE Integration Tests', () => {
           `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
            VALUES ($1, $2, 'status', $3, $4, NOW())
            RETURNING id`,
-          [userId, i, threadId, JSON.stringify({ message: `Event ${i}` })]
+          [userId, i, threadId, toJsonb({ message: `Event ${i}` })]
         );
         await pool.query(
           'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
@@ -120,7 +121,7 @@ describe('SSE Integration Tests', () => {
           `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
            VALUES ($1, $2, 'status', $3, $4, NOW())
            RETURNING id`,
-          [userId, i, threadId, JSON.stringify({ message: `Event ${i}` })]
+          [userId, i, threadId, toJsonb({ message: `Event ${i}` })]
         );
         await pool.query(
           'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
