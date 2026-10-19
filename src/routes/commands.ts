@@ -9,10 +9,11 @@ import type { CommandResult } from '../types.js';
 
 // Lazy-load brain to allow tests to change scenario via env var
 // Cache processor per scenario to allow test isolation
+// Read env var directly since config is cached at import time
 let processorCache: Map<string, CommandProcessor> = new Map();
 
 function getProcessor(): CommandProcessor {
-  const scenario = config.brain.scenario;
+  const scenario = process.env.MOCK_BRAIN_SCENARIO || 'happy_path';
   let processor = processorCache.get(scenario);
   
   if (!processor) {
