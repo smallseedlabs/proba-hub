@@ -19,9 +19,9 @@ export async function eventRoutes(fastify: FastifyInstance) {
   fastify.get<{ Querystring: EventsQuery }>(
     '/events',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
     },
-    async (request: FastifyRequest<{ Querystring: EventsQuery }>, reply: FastifyReply) => {
+    async (request, reply) => {
       const userId = request.user!.id;
       const afterSeq = request.query.after ? parseInt(request.query.after, 10) : undefined;
 
@@ -99,7 +99,7 @@ async function handleSSE(
   reply: FastifyReply
 ): Promise<void> {
   const lastEventId = request.headers['last-event-id'];
-  const lastSeq = lastEventId ? parseInt(lastEventId, 10) : 0;
+  const lastSeq = lastEventId ? parseInt(Array.isArray(lastEventId) ? lastEventId[0] : lastEventId, 10) : 0;
 
   reply.raw.writeHead(200, {
     'Content-Type': 'text/event-stream',

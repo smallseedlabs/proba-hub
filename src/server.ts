@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import { config } from './config.js';
@@ -9,6 +9,13 @@ import type { User } from './types.js';
 declare module 'fastify' {
   interface FastifyRequest {
     user?: User;
+  }
+  
+  interface FastifyInstance {
+    authenticate: (
+      request: FastifyRequest,
+      reply: FastifyReply
+    ) => Promise<void>;
   }
 }
 
@@ -28,7 +35,7 @@ await fastify.register(jwt, {
   secret: config.auth.jwtSecret,
 });
 
-fastify.decorate('authenticate', async function (request: typeof fastify.request, reply: typeof fastify.reply) {
+fastify.decorate('authenticate', async function (request: FastifyRequest, reply: FastifyReply) {
   try {
     let token: string | undefined;
     

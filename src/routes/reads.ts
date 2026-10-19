@@ -17,6 +17,10 @@ interface MessagesResponse {
   hasMore: boolean;
 }
 
+interface MessagesErrorResponse {
+  error: string;
+}
+
 interface InboxResponse {
   items: InboxItem[];
 }
@@ -29,7 +33,7 @@ export async function readRoutes(fastify: FastifyInstance) {
   fastify.get<{ Reply: ThreadsResponse }>(
     '/threads',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
     },
     async (request, reply) => {
       const userId = request.user!.id;
@@ -62,10 +66,10 @@ export async function readRoutes(fastify: FastifyInstance) {
     }
   );
 
-  fastify.get<{ Querystring: MessagesQuery; Reply: MessagesResponse }>(
+  fastify.get<{ Querystring: MessagesQuery; Reply: MessagesResponse | MessagesErrorResponse }>(
     '/messages',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
       schema: {
         querystring: {
           type: 'object',
@@ -120,7 +124,7 @@ export async function readRoutes(fastify: FastifyInstance) {
   fastify.get<{ Reply: InboxResponse }>(
     '/inbox',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
     },
     async (request, reply) => {
       const userId = request.user!.id;
@@ -149,7 +153,7 @@ export async function readRoutes(fastify: FastifyInstance) {
   fastify.get<{ Reply: GoalsResponse }>(
     '/goals',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
     },
     async (request, reply) => {
       const userId = request.user!.id;

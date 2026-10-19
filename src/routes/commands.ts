@@ -14,7 +14,7 @@ export async function commandRoutes(fastify: FastifyInstance) {
   fastify.post<{ Body: unknown; Reply: CommandResult }>(
     '/commands',
     {
-      onRequest: [(fastify as any).authenticate],
+      onRequest: [fastify.authenticate],
     },
     async (request, reply) => {
       const body = request.body;

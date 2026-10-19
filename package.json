@@ -31,7 +31,7 @@
     "microservice"
   ],
   "author": "Small Seed Labs",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.1.0",
     "@fastify/cors": "^9.0.1",

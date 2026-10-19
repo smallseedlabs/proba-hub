@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive README with architecture diagram and curl examples
 - CONTRIBUTING.md with development guidelines
 - Issue and PR templates
+- Apache License 2.0
 
 ### Dependencies
 

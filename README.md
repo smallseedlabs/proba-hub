@@ -3,7 +3,7 @@
 > **Interaction Hub** - Protocol service for Proba, an AI-native platform for testing products with ads.
 
 [![CI](https://github.com/smallseedlabs/proba-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/smallseedlabs/proba-hub/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 ## Overview
 
@@ -372,7 +372,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## License
 
-MIT © Small Seed Labs
+Apache License 2.0 © Small Seed Labs
 
 ## Related Projects
 

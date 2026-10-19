@@ -4,7 +4,6 @@ import { logger } from '../logger.js';
 import type { BrainPort, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
 import type { 
   CommandEnvelope, 
-  EventEnvelope, 
   BrainOutput,
   ControlPayload,
   CreateGoalPayload,
@@ -258,7 +257,7 @@ export class CommandProcessor {
     threadId: string,
     payload: Record<string, unknown>
   ): Promise<void> {
-    const askResult = await client.query(
+    await client.query(
       `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [

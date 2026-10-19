@@ -16,7 +16,10 @@ pool.on('error', (err) => {
   process.exit(-1);
 });
 
-export async function query<T>(sql: string, params?: unknown[]): Promise<pg.QueryResult<T>> {
+export async function query<T extends pg.QueryResultRow = any>(
+  sql: string, 
+  params?: unknown[]
+): Promise<pg.QueryResult<T>> {
   const client = await pool.connect();
   try {
     return await client.query<T>(sql, params);
