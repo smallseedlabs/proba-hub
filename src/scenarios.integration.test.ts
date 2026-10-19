@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
 import { randomUUID } from 'crypto';
+import { waitForEvents } from './test-helpers.js';
 
 const app = await initializeApp({ startBackgroundJobs: true });
 
@@ -77,9 +78,13 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     return JSON.parse(response.body);
   }
 
-  async function waitForProcessing() {
-    // Wait for command processing (setImmediate) + database write + outbox relay (1s poll)
-    await new Promise(resolve => setTimeout(resolve, 2500));
+  async function waitForNewEvents(minCount: number = 1, fromSeq: number = 0): Promise<any[]> {
+    return waitForEvents(
+      app,
+      token,
+      events => events.filter(e => e.seq > fromSeq).length >= minCount,
+      { timeout: 5000, interval: 50 }
+    );
   }
 
   describe('happy_path scenario', () => {
@@ -88,7 +93,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     });
 
     it('should complete full conversation flow: create_goal -> clarify -> plan -> approve -> decision', async () => {
-      // Step 1: Create goal
+      // Step 1: Create goal - wait for ask event
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -103,16 +108,13 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      let events = await getEvents();
-      expect(events.events.length).toBeGreaterThan(0);
-      
-      const askEvent = events.events.find((e: any) => e.type === 'ask');
-      expect(askEvent).toBeDefined();
+      let events = await waitForNewEvents(1);
+      const askEvent = events.find((e: any) => e.type === 'ask');
+      expect(askEvent, 'Should have ask event after create_goal').toBeDefined();
       expect(askEvent.payload.askType).toBe('clarify');
+      const step1Seq = askEvent.seq;
 
-      // Step 2: Answer clarification
+      // Step 2: Answer clarification - wait for plan ask
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -127,15 +129,14 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const planAsk = events.events.find((e: any) => 
-        e.type === 'ask' && e.payload.askType === 'plan_approval'
+      events = await waitForNewEvents(1, step1Seq);
+      const planAsk = events.find((e: any) => 
+        e.seq > step1Seq && e.type === 'ask' && e.payload.askType === 'plan_approval'
       );
-      expect(planAsk).toBeDefined();
+      expect(planAsk, 'Should have plan_approval ask after answer_ask').toBeDefined();
+      const step2Seq = planAsk.seq;
 
-      // Step 3: Approve plan
+      // Step 3: Approve plan - wait for action ask
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -148,15 +149,14 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const actionAsk = events.events.find((e: any) => 
-        e.type === 'ask' && e.payload.askType === 'action_approval'
+      events = await waitForNewEvents(1, step2Seq);
+      const actionAsk = events.find((e: any) => 
+        e.seq > step2Seq && e.type === 'ask' && e.payload.askType === 'action_approval'
       );
-      expect(actionAsk).toBeDefined();
+      expect(actionAsk, 'Should have action_approval ask after approve_plan').toBeDefined();
+      const step3Seq = actionAsk.seq;
 
-      // Step 4: Answer action approval
+      // Step 4: Answer action approval - wait for decision message
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -170,17 +170,14 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const messageEvents = events.events.filter((e: any) => e.type === 'message');
-      expect(messageEvents.length).toBeGreaterThan(0);
+      events = await waitForNewEvents(1, step3Seq);
+      const messageEvents = events.filter((e: any) => e.seq > step3Seq && e.type === 'message');
+      expect(messageEvents.length, 'Should have message events after final approval').toBeGreaterThan(0);
       
-      // Should have decision message
       const hasDecision = messageEvents.some((e: any) => 
         e.payload.text && e.payload.text.includes('Decision')
       );
-      expect(hasDecision).toBe(true);
+      expect(hasDecision, 'Should have Decision message').toBe(true);
     });
   });
 
@@ -190,7 +187,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     });
 
     it('should handle edited approval (+20% to +10%)', async () => {
-      // Create goal triggers plan
+      // Create goal triggers plan - wait for ask
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -205,12 +202,12 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
+      let events = await waitForNewEvents(1);
+      const planAsk = events.find((e: any) => e.type === 'ask');
+      expect(planAsk, 'Should have ask after create_goal').toBeDefined();
+      const step1Seq = planAsk.seq;
 
-      let events = await getEvents();
-      const planAsk = events.events.find((e: any) => e.type === 'ask');
-
-      // Approve plan
+      // Approve plan - wait for action ask
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -223,14 +220,14 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const actionAsk = events.events.find((e: any) => 
-        e.type === 'ask' && e.payload.askType === 'action_approval'
+      events = await waitForNewEvents(1, step1Seq);
+      const actionAsk = events.find((e: any) => 
+        e.seq > step1Seq && e.type === 'ask' && e.payload.askType === 'action_approval'
       );
+      expect(actionAsk, 'Should have action_approval ask').toBeDefined();
+      const step2Seq = actionAsk.seq;
 
-      // Edit the approval
+      // Edit the approval - wait for adjusted message
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -246,11 +243,9 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const replyEvents = events.events.filter((e: any) => e.type === 'message');
-      expect(replyEvents.length).toBeGreaterThan(0);
+      events = await waitForNewEvents(1, step2Seq);
+      const replyEvents = events.filter((e: any) => e.seq > step2Seq && e.type === 'message');
+      expect(replyEvents.length, 'Should have message after edit').toBeGreaterThan(0);
     });
   });
 
@@ -275,13 +270,13 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      let events = await getEvents();
-      const firstAsk = events.events.find((e: any) => e.type === 'ask');
+      let events = await waitForNewEvents(1);
+      const firstAsk = events.find((e: any) => e.type === 'ask');
+      expect(firstAsk, 'Should have first ask').toBeDefined();
       expect(firstAsk.payload.askType).toBe('clarify');
+      const step1Seq = firstAsk.seq;
 
-      // Answer first clarify
+      // Answer first clarify - wait for second clarify
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -296,11 +291,11 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
-      const secondAsk = events.events.filter((e: any) => e.type === 'ask').pop();
+      events = await waitForNewEvents(1, step1Seq);
+      const secondAsk = events.filter((e: any) => e.seq > step1Seq && e.type === 'ask').pop();
+      expect(secondAsk, 'Should have second ask').toBeDefined();
       expect(secondAsk.payload.askType).toBe('clarify');
+      const step2Seq = secondAsk.seq;
 
       // Answer second clarify - should end loop
       await sendCommand({
@@ -317,18 +312,16 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      events = await getEvents();
+      events = await waitForNewEvents(1, step2Seq);
+      const finalEvents = events.filter(e => e.seq > step2Seq);
       
       // Should have plan now, not another clarify
-      const finalEvents = events.events.slice(-3);
       const hasPlan = finalEvents.some((e: any) => 
         e.type === 'ask' && e.payload.askType === 'plan_approval'
       );
       const hasReply = finalEvents.some((e: any) => e.type === 'message');
       
-      expect(hasPlan || hasReply).toBe(true);
+      expect(hasPlan || hasReply, 'Should have plan or reply, not third clarify').toBe(true);
     });
   });
 
@@ -349,11 +342,9 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      const events = await getEvents();
-      const statusEvent = events.events.find((e: any) => e.type === 'status');
-      expect(statusEvent).toBeDefined();
+      const events = await waitForNewEvents(1);
+      const statusEvent = events.find((e: any) => e.type === 'status');
+      expect(statusEvent, 'Should have status event').toBeDefined();
       expect(statusEvent.payload.state).toBe('pause');
     });
 
@@ -369,11 +360,9 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      const events = await getEvents();
-      const statusEvent = events.events.find((e: any) => e.type === 'status');
-      expect(statusEvent).toBeDefined();
+      const events = await waitForNewEvents(1);
+      const statusEvent = events.find((e: any) => e.type === 'status');
+      expect(statusEvent, 'Should have status event').toBeDefined();
       expect(statusEvent.payload.state).toBe('resume');
     });
 
@@ -389,11 +378,9 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      const events = await getEvents();
-      const statusEvent = events.events.find((e: any) => e.type === 'status');
-      expect(statusEvent).toBeDefined();
+      const events = await waitForNewEvents(1);
+      const statusEvent = events.find((e: any) => e.type === 'status');
+      expect(statusEvent, 'Should have status event').toBeDefined();
       expect(statusEvent.payload.state).toBe('kill');
     });
   });
@@ -418,13 +405,11 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         sentAt: new Date().toISOString(),
       });
 
-      await waitForProcessing();
-
-      const events = await getEvents();
+      const events = await waitForNewEvents(1);
       
       // Should have error event, not crash
-      const errorEvent = events.events.find((e: any) => e.type === 'error');
-      expect(errorEvent).toBeDefined();
+      const errorEvent = events.find((e: any) => e.type === 'error');
+      expect(errorEvent, 'Should have error event').toBeDefined();
       expect(errorEvent.payload.code).toBe('brain_error');
     });
   });

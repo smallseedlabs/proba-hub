@@ -2,21 +2,29 @@ import { pool } from '../db/client.js';
 import { redisPub, redisSub } from './redis.js';
 import { sseManager } from './sse-manager.js';
 import { logger } from '../logger.js';
+import { config } from '../config.js';
 import type { EventEnvelope } from '@smallseedlabs/proba-protocol';
 
 const CHANNEL = 'proba:events';
-const POLL_INTERVAL_MS = 1000;
+let publisherInterval: NodeJS.Timeout | null = null;
 
 export function startOutboxRelay(): void {
   startPublisher();
   startSubscriber();
-  logger.info('Outbox relay started');
+  logger.info({ pollIntervalMs: config.outbox.pollIntervalMs }, 'Outbox relay started');
 }
 
-function startPublisher(): void {
-  setInterval(async () => {
-    try {
-      const result = await pool.query(
+// Trigger immediate relay check (called after command commits)
+export function kickOutboxRelay(): void {
+  // Run publisher immediately without waiting for next interval
+  publishPendingEvents().catch(err => {
+    logger.error({ err }, 'Error in kicked relay');
+  });
+}
+
+async function publishPendingEvents(): Promise<void> {
+  try {
+    const result = await pool.query(
         `SELECT o.id, o.user_id, o.event_id,
                 e.seq, e.type, e.thread_id, e.payload,
                 u.component, u.version, u.props, u.actions,
@@ -72,10 +80,15 @@ function startPublisher(): void {
           'Published event to Redis'
         );
       }
-    } catch (error) {
-      logger.error({ error }, 'Outbox publisher error');
-    }
-  }, POLL_INTERVAL_MS);
+  } catch (error) {
+    logger.error({ error }, 'Outbox publisher error');
+  }
+}
+
+function startPublisher(): void {
+  publisherInterval = setInterval(() => {
+    publishPendingEvents();
+  }, config.outbox.pollIntervalMs);
 }
 
 function startSubscriber(): void {

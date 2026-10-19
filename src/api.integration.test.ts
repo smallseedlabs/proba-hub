@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
+import { waitForEvents } from './test-helpers.js';
 
 const app = await initializeApp({ startBackgroundJobs: true });
 
@@ -108,8 +109,8 @@ describe('API Integration Tests', () => {
 
       expect(response1.statusCode).toBe(202);
 
-      // Wait for async processing (setImmediate) + database write
-      await new Promise(resolve => setTimeout(resolve, 2500));
+      // Wait for at least one event
+      await waitForEvents(app, token, events => events.length > 0, { timeout: 5000 });
 
       // Second request with same clientMsgId should be idempotent
       const response2 = await app.inject({
@@ -181,8 +182,8 @@ describe('API Integration Tests', () => {
 
       await Promise.all(commandPromises);
 
-      // Wait for all commands to process (setImmediate batch + database + outbox)
-      await new Promise(resolve => setTimeout(resolve, 4000));
+      // Wait for at least numCommands events
+      await waitForEvents(app, token, events => events.length >= numCommands, { timeout: 10000 });
 
       // Check that sequences are gap-free
       const events = await pool.query(

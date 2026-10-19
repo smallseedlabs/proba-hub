@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
+import { kickOutboxRelay } from './outbox-relay.js';
 import type { BrainPort, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
 import type { 
   CommandEnvelope, 
@@ -90,6 +91,9 @@ export class CommandProcessor {
         'UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2',
         ['processed', command.id]
       );
+
+      // Kick outbox relay immediately after transaction commits
+      setImmediate(() => kickOutboxRelay());
 
       return { command, events };
     });

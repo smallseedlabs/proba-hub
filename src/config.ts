@@ -40,6 +40,10 @@ export const config = {
     expiryCheckIntervalMs: parseInt(process.env.ASK_EXPIRY_CHECK_INTERVAL_MS || '60000', 10),
   },
   
+  outbox: {
+    pollIntervalMs: parseInt(process.env.OUTBOX_POLL_MS || '1000', 10),
+  },
+  
   brain: {
     scenario: process.env.MOCK_BRAIN_SCENARIO || 'happy_path',
   },

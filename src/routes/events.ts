@@ -97,6 +97,11 @@ async function handleSSE(
     'X-Accel-Buffering': 'no',
   });
 
+  // Flush headers immediately to start streaming
+  if (typeof reply.raw.flushHeaders === 'function') {
+    reply.raw.flushHeaders();
+  }
+
   const catchupResult = await pool.query(
     `SELECT e.id, e.user_id, e.seq, e.type, e.thread_id, e.payload,
             u.component, u.version, u.props, u.actions,
