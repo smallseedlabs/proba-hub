@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { pool } from './client.js';
-import { toJsonb, fromJsonb } from './jsonb.js';
+import { toJsonb } from './jsonb.js';
 
 describe('JSONB encoding/decoding', () => {
   beforeAll(async () => {

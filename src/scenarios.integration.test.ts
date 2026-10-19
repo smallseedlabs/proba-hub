@@ -126,7 +126,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       const step2Seq = planAsk.seq;
 
       // Step 3: Approve plan - wait for action ask
-      const approvePlanResponse = await sendCommand({
+      await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
         type: 'approve_plan',
@@ -137,7 +137,6 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         },
         sentAt: new Date().toISOString(),
       });
-      console.log('approve_plan response:', approvePlanResponse.statusCode, approvePlanResponse.json());
       
       // Give async processing time to complete
       await new Promise(resolve => setTimeout(resolve, 100));
