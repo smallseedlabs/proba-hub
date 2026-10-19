@@ -128,7 +128,7 @@ export interface BrainContext {
 
 export interface SSEConnection {
   userId: string;
-  lastSeq: number;
+  /** Deliver a live event; the connection de-duplicates and fills gaps by seq. */
   send: (event: EventEnvelope) => void;
   close: () => void;
 }

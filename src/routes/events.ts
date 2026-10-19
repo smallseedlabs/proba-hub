@@ -3,10 +3,13 @@ import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { sseManager } from '../services/sse-manager.js';
+import { buildEventEnvelope, EVENT_SELECT, type EventRow } from '../services/event-envelope.js';
+import type { SSEConnection } from '../types.js';
 import type { EventEnvelope } from '@smallseedlabs/proba-protocol';
 
 interface EventsQuery {
   after?: string;
+  token?: string;
 }
 
 interface PollingResponse {
@@ -15,7 +18,47 @@ interface PollingResponse {
   hasMore: boolean;
 }
 
-export async function eventRoutes(fastify: FastifyInstance) {
+export interface EventRoutesOptions {
+  heartbeatIntervalMs?: number;
+}
+
+const POLL_LIMIT = 50;
+const REPLAY_BATCH = 500;
+
+function parseSeq(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return NaN;
+  return parseInt(raw.trim(), 10);
+}
+
+async function fetchEvents(userId: string, afterSeq: number, limit: number, upToSeq?: number): Promise<EventRow[]> {
+  const params: unknown[] = [userId, afterSeq, limit];
+  let bound = '';
+  if (upToSeq !== undefined) {
+    params.push(upToSeq);
+    bound = 'AND e.seq <= $4';
+  }
+  const result = await pool.query<EventRow>(
+    `${EVENT_SELECT}
+     WHERE e.user_id = $1 AND e.seq > $2 ${bound}
+     ORDER BY e.seq ASC
+     LIMIT $3`,
+    params
+  );
+  return result.rows;
+}
+
+export async function eventRoutes(fastify: FastifyInstance, opts: EventRoutesOptions) {
+  const heartbeatIntervalMs = opts.heartbeatIntervalMs ?? config.sse.heartbeatIntervalMs;
+
+  // Connections opened through this app instance; ended on close so that
+  // fastify.close() does not hang on long-lived streams.
+  const openStreams = new Set<() => void>();
+  fastify.addHook('preClose', async () => {
+    for (const end of [...openStreams]) end();
+  });
+
   fastify.get<{ Querystring: EventsQuery }>(
     '/events',
     {
@@ -23,28 +66,23 @@ export async function eventRoutes(fastify: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id;
-      const afterSeq = request.query.after ? parseInt(request.query.after, 10) : undefined;
 
-      if (afterSeq !== undefined) {
+      if (request.query.after !== undefined) {
+        const afterSeq = parseSeq(request.query.after);
+        if (afterSeq === null || Number.isNaN(afterSeq)) {
+          return reply.code(400).send({ error: 'invalid_after' });
+        }
         return handlePolling(userId, afterSeq, reply);
       }
 
-      return handleSSE(userId, request, reply);
+      const lastEventId = parseSeq(request.headers['last-event-id']);
+      if (Number.isNaN(lastEventId)) {
+        return reply.code(400).send({ error: 'invalid_last_event_id' });
+      }
+
+      handleSSE(userId, lastEventId ?? 0, request, reply, heartbeatIntervalMs, openStreams);
     }
   );
-}
-
-interface EventRow {
-  seq: number;
-  type: string;
-  thread_id?: string;
-  payload: unknown;
-  created_at: Date;
-  component?: string;
-  version?: string;
-  props?: unknown;
-  actions?: unknown;
-  fallback_text?: string;
 }
 
 async function handlePolling(
@@ -52,27 +90,11 @@ async function handlePolling(
   afterSeq: number,
   reply: FastifyReply
 ): Promise<void> {
-  const limit = 50;
+  const rows = await fetchEvents(userId, afterSeq, POLL_LIMIT + 1);
 
-  const result = await pool.query(
-    `SELECT e.id, e.user_id, e.seq, e.type, e.thread_id, e.payload,
-            u.component, u.version, u.props, u.actions,
-            e.fallback_text, e.created_at
-     FROM events e
-     LEFT JOIN ui_payloads u ON e.ui_payload_id = u.id
-     WHERE e.user_id = $1 AND e.seq > $2
-     ORDER BY e.seq ASC
-     LIMIT $3`,
-    [userId, afterSeq, limit + 1]
-  );
-
-  const hasMore = result.rows.length > limit;
-  const events = result.rows.slice(0, limit);
-
-  const envelopes: EventEnvelope[] = events.map((row: EventRow) => {
-    return buildEventEnvelope(row);
-  });
-
+  const hasMore = rows.length > POLL_LIMIT;
+  const events = rows.slice(0, POLL_LIMIT);
+  const envelopes = events.map(buildEventEnvelope);
   const nextSeq = events.length > 0 ? events[events.length - 1].seq : afterSeq;
 
   reply.send({
@@ -82,107 +104,117 @@ async function handlePolling(
   } as PollingResponse);
 }
 
-async function handleSSE(
+/**
+ * SSE delivery with exactly-once, in-order semantics per connection:
+ *
+ * 1. Register the live listener BEFORE reading the replay, so events
+ *    committed while the replay query runs are not lost.
+ * 2. All writes go through a per-connection serial queue; the replay runs
+ *    first and live events queue behind it.
+ * 3. Each write is filtered by `lastSeq`: seq <= lastSeq is a duplicate
+ *    (already replayed / re-published) and is dropped; seq > lastSeq + 1
+ *    means we missed something (out-of-order publish, Redis hiccup), so the
+ *    gap is filled from Postgres, which is the source of truth.
+ */
+function handleSSE(
   userId: string,
+  initialSeq: number,
   request: FastifyRequest,
-  reply: FastifyReply
-): Promise<void> {
-  const lastEventId = request.headers['last-event-id'];
-  const lastSeq = lastEventId ? parseInt(Array.isArray(lastEventId) ? lastEventId[0] : lastEventId, 10) : 0;
+  reply: FastifyReply,
+  heartbeatIntervalMs: number,
+  openStreams: Set<() => void>
+): void {
+  reply.hijack();
+  const res = reply.raw;
 
-  reply.raw.writeHead(200, {
+  let lastSeq = initialSeq;
+  let closed = false;
+  let queue: Promise<void> = Promise.resolve();
+
+  const write = (chunk: string) => {
+    if (closed || res.destroyed || res.writableEnded) return;
+    res.write(chunk);
+  };
+
+  const writeEvent = (event: EventEnvelope) => {
+    if (event.seq <= lastSeq) return; // duplicate
+    lastSeq = event.seq;
+    write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  };
+
+  const enqueue = (task: () => Promise<void>) => {
+    queue = queue.then(async () => {
+      if (closed) return;
+      try {
+        await task();
+      } catch (err) {
+        logger.error({ err, userId }, 'SSE delivery error; closing stream so the client resumes');
+        cleanup();
+      }
+    });
+  };
+
+  const replayFrom = async (upToSeq?: number) => {
+    for (;;) {
+      const rows = await fetchEvents(userId, lastSeq, REPLAY_BATCH, upToSeq);
+      for (const row of rows) writeEvent(buildEventEnvelope(row));
+      if (rows.length < REPLAY_BATCH) return;
+    }
+  };
+
+  const connection: SSEConnection = {
+    userId,
+    send: (event: EventEnvelope) => {
+      enqueue(async () => {
+        if (event.seq <= lastSeq) return;
+        if (event.seq > lastSeq + 1) {
+          await replayFrom(event.seq);
+        }
+        writeEvent(event);
+      });
+    },
+    close: () => cleanup(),
+  };
+
+  let heartbeat: NodeJS.Timeout | null = null;
+
+  function cleanup() {
+    if (closed) return;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    sseManager.removeConnection(connection);
+    openStreams.delete(cleanup);
+    if (!res.writableEnded) res.end();
+    logger.info({ userId, lastSeq }, 'SSE connection closed');
+  }
+
+  // 1. Listen first, then replay.
+  sseManager.addConnection(connection);
+  openStreams.add(cleanup);
+  res.on('close', cleanup);
+  request.raw.on('aborted', cleanup);
+
+  res.writeHead(200, {
+    // keep headers already set by hooks (e.g. CORS) - hijack bypasses reply.send
+    ...(reply.getHeaders() as Record<string, string>),
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
+  res.flushHeaders();
+  // Initial comment: lets clients/proxies know the stream is live.
+  write(': connected\n\n');
 
-  // Flush headers immediately to start streaming
-  if (typeof reply.raw.flushHeaders === 'function') {
-    reply.raw.flushHeaders();
-  }
+  enqueue(() => replayFrom());
 
-  const catchupResult = await pool.query(
-    `SELECT e.id, e.user_id, e.seq, e.type, e.thread_id, e.payload,
-            u.component, u.version, u.props, u.actions,
-            e.fallback_text, e.created_at
-     FROM events e
-     LEFT JOIN ui_payloads u ON e.ui_payload_id = u.id
-     WHERE e.user_id = $1 AND e.seq > $2
-     ORDER BY e.seq ASC`,
-    [userId, lastSeq]
-  );
-
-  for (const row of catchupResult.rows) {
-    const envelope = buildEventEnvelope(row);
-    sendSSEEvent(reply, envelope);
-  }
-
-  const connection = {
-    userId,
-    lastSeq: catchupResult.rows.length > 0 
-      ? catchupResult.rows[catchupResult.rows.length - 1].seq 
-      : lastSeq,
-    send: (event: EventEnvelope) => {
-      sendSSEEvent(reply, event);
-    },
-    close: () => {
-      reply.raw.end();
-    },
-  };
-
-  sseManager.addConnection(connection);
-
-  const heartbeatInterval = setInterval(() => {
-    if (!reply.raw.writable) {
-      clearInterval(heartbeatInterval);
-      sseManager.removeConnection(userId);
+  heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      cleanup();
       return;
     }
-    reply.raw.write(': heartbeat\n\n');
-  }, config.sse.heartbeatIntervalMs);
+    write(': heartbeat\n\n');
+  }, heartbeatIntervalMs);
 
-  request.raw.on('close', () => {
-    clearInterval(heartbeatInterval);
-    sseManager.removeConnection(userId);
-    logger.info({ userId }, 'SSE connection closed');
-  });
-
-  logger.info({ userId, lastSeq }, 'SSE connection established');
-}
-
-function buildEventEnvelope(row: EventRow): EventEnvelope {
-  const envelope: EventEnvelope = {
-    kind: 'event',
-    seq: row.seq,
-    type: row.type as EventEnvelope['type'],
-    threadId: row.thread_id,
-    payload: row.payload,
-    at: row.created_at.toISOString(),
-  };
-
-  if (row.component && row.version && row.props) {
-    const ui = {
-      component: row.component,
-      version: row.version,
-      props: row.props,
-    };
-    if (row.actions) {
-      Object.assign(ui, { actions: row.actions });
-    }
-    envelope.ui = ui as EventEnvelope['ui'];
-  }
-
-  if (row.fallback_text) {
-    envelope.fallbackText = row.fallback_text;
-  }
-
-  return envelope;
-}
-
-function sendSSEEvent(reply: FastifyReply, event: EventEnvelope): void {
-  const data = JSON.stringify(event);
-  reply.raw.write(`id: ${event.seq}\n`);
-  reply.raw.write(`event: ${event.type}\n`);
-  reply.raw.write(`data: ${data}\n\n`);
+  logger.info({ userId, lastSeq: initialSeq }, 'SSE connection established');
 }

@@ -1,30 +1,21 @@
 import type { FastifyInstance } from 'fastify';
-import { commandEnvelopeSchema, type CommandEnvelope } from '@smallseedlabs/proba-protocol';
-import { CommandProcessor } from '../services/command-processor.js';
-import { MockBrain } from '../brain/mock-brain.js';
+import {
+  commandEnvelopeSchema,
+  validateCommandPayload,
+  type CommandEnvelope,
+} from '@smallseedlabs/proba-protocol';
+import type { CommandProcessor } from '../services/command-processor.js';
 import { logger } from '../logger.js';
 import { pool } from '../db/client.js';
 import type { CommandResult } from '../types.js';
 
-// Lazy-load brain to allow tests to change scenario via env var
-// Cache processor per scenario to allow test isolation
-// Read env var directly since config is cached at import time
-const processorCache: Map<string, CommandProcessor> = new Map();
-
-function getProcessor(): CommandProcessor {
-  const scenario = process.env.MOCK_BRAIN_SCENARIO || 'happy_path';
-  let processor = processorCache.get(scenario);
-  
-  if (!processor) {
-    const brain = new MockBrain(scenario);
-    processor = new CommandProcessor(brain);
-    processorCache.set(scenario, processor);
-  }
-  
-  return processor;
+export interface CommandRoutesOptions {
+  processor: CommandProcessor;
 }
 
-export async function commandRoutes(fastify: FastifyInstance) {
+export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoutesOptions) {
+  const { processor } = opts;
+
   fastify.post<{ Body: unknown; Reply: CommandResult }>(
     '/commands',
     {
@@ -32,6 +23,7 @@ export async function commandRoutes(fastify: FastifyInstance) {
     },
     async (request, reply) => {
       const body = request.body;
+      const userId = request.user!.id;
 
       const validation = commandEnvelopeSchema.safeParse(body);
       if (!validation.success) {
@@ -46,10 +38,21 @@ export async function commandRoutes(fastify: FastifyInstance) {
 
       const envelope = validation.data as CommandEnvelope;
 
+      // The envelope schema types `payload` as unknown; validate it against the
+      // per-command-type schema before it reaches the processor/DB.
+      if (!validateCommandPayload(envelope.type, envelope.payload)) {
+        logger.warn({ type: envelope.type, clientMsgId: envelope.clientMsgId }, 'Invalid command payload');
+        return reply.code(202).send({
+          status: 'rejected',
+          clientMsgId: envelope.clientMsgId,
+          reason: 'validation_error',
+        });
+      }
+
       if (envelope.threadId) {
         const threadCheck = await pool.query(
           'SELECT id FROM threads WHERE id = $1 AND user_id = $2',
-          [envelope.threadId, request.user!.id]
+          [envelope.threadId, userId]
         );
 
         if (threadCheck.rows.length === 0) {
@@ -62,22 +65,18 @@ export async function commandRoutes(fastify: FastifyInstance) {
       } else if (envelope.type !== 'send_message' && envelope.type !== 'create_goal') {
         await pool.query(
           'INSERT INTO threads (user_id, status) VALUES ($1, $2) RETURNING id',
-          [request.user!.id, 'active']
+          [userId, 'active']
         );
       }
 
-      // Each command gets its own async execution context to ensure transaction isolation
-      setImmediate(async () => {
-        try {
-          // processCommand creates its own transaction, so failures won't affect other commands
-          await getProcessor().processCommand(request.user!.id, envelope);
-        } catch (error) {
-          // Log but don't crash - the error should be surfaced as an error event
+      // Each command runs in its own transaction, asynchronously after the 202.
+      setImmediate(() => {
+        processor.processCommand(userId, envelope).catch((error) => {
           logger.error(
-            { error, userId: request.user!.id, clientMsgId: envelope.clientMsgId },
+            { error, userId, clientMsgId: envelope.clientMsgId },
             'Command processing failed in background'
           );
-        }
+        });
       });
 
       reply.code(202).send({

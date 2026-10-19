@@ -2,9 +2,9 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import { shutdown as shutdownDb } from './db/client.js';
 import { shutdown as shutdownRedis } from './services/redis.js';
-import { initializeApp } from './app.js';
+import { buildApp } from './app.js';
 
-const fastify = await initializeApp({ startBackgroundJobs: true });
+const fastify = await buildApp({ startBackgroundJobs: true });
 
 const signals = ['SIGINT', 'SIGTERM'];
 

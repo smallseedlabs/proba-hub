@@ -1,17 +1,35 @@
 import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { kickOutboxRelay } from './outbox-relay.js';
 
+let expiryTimer: NodeJS.Timeout | null = null;
+let refCount = 0;
+
+/** Start the ask expiry job. Ref-counted so several app instances can share it. */
 export function startAskExpiryJob(): void {
-  setInterval(async () => {
+  refCount++;
+  if (expiryTimer) return;
+
+  expiryTimer = setInterval(async () => {
     try {
       await processExpiredAsks();
     } catch (error) {
       logger.error({ error }, 'Ask expiry job error');
     }
   }, config.ask.expiryCheckIntervalMs);
+  expiryTimer.unref();
 
   logger.info('Ask expiry job started');
+}
+
+export function stopAskExpiryJob(): void {
+  refCount = Math.max(0, refCount - 1);
+  if (refCount === 0 && expiryTimer) {
+    clearInterval(expiryTimer);
+    expiryTimer = null;
+    logger.info('Ask expiry job stopped');
+  }
 }
 
 async function processExpiredAsks(): Promise<void> {
@@ -41,10 +59,15 @@ async function handleExpiredAsk(
   try {
     await client.query('BEGIN');
 
-    await client.query(
-      `UPDATE asks SET status = 'expired' WHERE id = $1`,
+    // Guard against double expiry (concurrent job runs / answer racing expiry)
+    const expired = await client.query(
+      `UPDATE asks SET status = 'expired' WHERE id = $1 AND status = 'pending' RETURNING id`,
       [askId]
     );
+    if (expired.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
 
     await client.query(
       `UPDATE inbox_items SET status = 'expired' WHERE related_ask_id = $1`,
@@ -52,7 +75,7 @@ async function handleExpiredAsk(
     );
 
     const userResult = await client.query(
-      'SELECT user_id FROM asks WHERE id = $1',
+      'SELECT t.user_id FROM asks a JOIN threads t ON t.id = a.thread_id WHERE a.id = $1',
       [askId]
     );
     const userId = userResult.rows[0].user_id;
@@ -94,6 +117,7 @@ async function handleExpiredAsk(
     );
 
     await client.query('COMMIT');
+    kickOutboxRelay();
 
     logger.info({ askId, onExpire, resolution }, 'Handled expired ask');
   } catch (error) {
