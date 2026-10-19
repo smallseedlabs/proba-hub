@@ -3,6 +3,12 @@ import { config } from '../config.js';
 
 const { Pool } = pg;
 
+// Fix bigint (type OID 20) returned as string by pg - parse to number
+// This is required by the protocol which expects seq as number
+pg.types.setTypeParser(20, (val) => {
+  return parseInt(val, 10);
+});
+
 export const pool = new Pool({
   connectionString: config.database.url,
   min: config.database.poolMin,

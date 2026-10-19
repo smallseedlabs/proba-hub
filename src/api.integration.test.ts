@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
 
-const app = await initializeApp();
+const app = await initializeApp({ startBackgroundJobs: true });
 
 describe('API Integration Tests', () => {
   let token: string;
@@ -108,8 +108,8 @@ describe('API Integration Tests', () => {
 
       expect(response1.statusCode).toBe(202);
 
-      // Wait for processing
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait for async processing
+      await new Promise(resolve => setTimeout(resolve, 1500));
 
       // Second request with same clientMsgId should be idempotent
       const response2 = await app.inject({
@@ -181,8 +181,8 @@ describe('API Integration Tests', () => {
 
       await Promise.all(commandPromises);
 
-      // Wait for all commands to process
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for all commands to process through outbox relay
+      await new Promise(resolve => setTimeout(resolve, 3000));
 
       // Check that sequences are gap-free
       const events = await pool.query(

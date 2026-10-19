@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
 
-const app = await initializeApp();
+const app = await initializeApp({ startBackgroundJobs: true });
 
 describe('SSE Integration Tests', () => {
   let token: string;

@@ -3,13 +3,8 @@ import { logger } from './logger.js';
 import { shutdown as shutdownDb } from './db/client.js';
 import { shutdown as shutdownRedis } from './services/redis.js';
 import { initializeApp } from './app.js';
-import { startOutboxRelay } from './services/outbox-relay.js';
-import { startAskExpiryJob } from './services/ask-expiry.js';
 
-const fastify = await initializeApp();
-
-startOutboxRelay();
-startAskExpiryJob();
+const fastify = await initializeApp({ startBackgroundJobs: true });
 
 const signals = ['SIGINT', 'SIGTERM'];
 

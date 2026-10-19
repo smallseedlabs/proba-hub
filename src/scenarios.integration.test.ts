@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
 
-const app = await initializeApp();
+const app = await initializeApp({ startBackgroundJobs: true });
 
 describe('Mock Brain Scenarios Integration Tests', () => {
   let token: string;
@@ -77,7 +77,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   }
 
   async function waitForProcessing() {
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Wait for command processing + outbox relay + Redis pub/sub
+    await new Promise(resolve => setTimeout(resolve, 1500));
   }
 
   describe('happy_path scenario', () => {
