@@ -76,11 +76,35 @@ export class CommandProcessor {
           await this.addToOutbox(client, userId, event.id);
         } catch (error) {
           logger.error({ error, output }, 'Failed to process brain output');
+          
+          // Surface error as error event
+          try {
+            const seq = await this.getNextSeq(client, userId);
+            const errorEvent = await client.query<Event>(
+              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+               VALUES ($1, $2, 'error', $3, $4, NOW())
+               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                         payload, created_at as "createdAt"`,
+              [userId, seq, envelope.threadId, { code: 'brain_error', message: (error as Error).message }]
+            );
+            const errorEventRow = errorEvent.rows[0];
+            events.push(errorEventRow);
+            await this.addToOutbox(client, userId, errorEventRow.id);
+          } catch (innerError) {
+            logger.error({ error: innerError }, 'Failed to create error event');
+          }
         }
       }
 
       if (envelope.type === 'answer_ask') {
-        await this.handleAskAnswer(client, envelope.payload as AnswerAskPayload);
+        const answerPayload = envelope.payload as AnswerAskPayload;
+        const askType = (envelope.payload as unknown as Record<string, unknown>).askType;
+        logger.info({ askId: answerPayload.askId, askType }, 'Handling answer_ask command');
+        await this.handleAskAnswer(client, answerPayload);
+      }
+
+      if (envelope.type === 'approve_plan') {
+        logger.info({ planId: (envelope.payload as Record<string, unknown>).planId }, 'Handling approve_plan command');
       }
 
       if (envelope.type === 'create_goal') {

@@ -28,15 +28,29 @@ interface Scenario {
   steps: ScenarioStep[];
 }
 
+interface ThreadState {
+  stepIndex: number;
+  clarificationRound: number;
+}
+
 export class MockBrain extends BaseBrainPort {
   private scenario: Scenario | null = null;
   private scenarioName: string;
-  private stepIndex = 0;
-  private clarificationRound = 0;
+  private threadStates: Map<string, ThreadState> = new Map();
 
   constructor(scenarioName: string) {
     super();
     this.scenarioName = scenarioName;
+  }
+
+  private getThreadState(threadId: string): ThreadState {
+    let state = this.threadStates.get(threadId);
+    if (!state) {
+      state = { stepIndex: 0, clarificationRound: 0 };
+      this.threadStates.set(threadId, state);
+      logger.debug({ threadId, scenario: this.scenarioName }, 'Created new thread state');
+    }
+    return state;
   }
 
   async loadScenario(): Promise<void> {
@@ -53,12 +67,26 @@ export class MockBrain extends BaseBrainPort {
     }
   }
 
-  async process(command: CommandEnvelope, _context: BrainContext): Promise<BrainOutput[]> {
+  async process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[]> {
     await this.loadScenario();
     
     if (!this.scenario) {
       throw new Error('Scenario not loaded');
     }
+
+    const threadId = context.threadId || 'default';
+    const state = this.getThreadState(threadId);
+
+    logger.info(
+      { 
+        scenario: this.scenarioName,
+        threadId,
+        commandType: command.type,
+        stepIndex: state.stepIndex,
+        clarificationRound: state.clarificationRound
+      },
+      'MockBrain processing command'
+    );
 
     if (command.type === 'control') {
       return [
@@ -71,16 +99,18 @@ export class MockBrain extends BaseBrainPort {
 
     if (command.type === 'answer_ask') {
       const payload = command.payload as Record<string, unknown>;
+      logger.info({ askId: payload.askId, askType: payload.askType, choice: payload.choice }, 'Processing answer_ask');
       if (payload.choice !== 'approve' && payload.askType === 'clarify') {
-        this.clarificationRound++;
+        state.clarificationRound++;
+        logger.debug({ threadId, clarificationRound: state.clarificationRound }, 'Incremented clarification round');
       }
     }
 
-    for (let i = this.stepIndex; i < this.scenario.steps.length; i++) {
+    for (let i = state.stepIndex; i < this.scenario.steps.length; i++) {
       const step = this.scenario.steps[i];
       
-      if (this.matchesTrigger(step.trigger, command)) {
-        this.stepIndex = i + 1;
+      if (this.matchesTrigger(step.trigger, command, state)) {
+        state.stepIndex = i + 1;
         
         const outputs = step.outputs.map(output => {
           if (output.type === 'clarify' && 'expiresIn' in output) {
@@ -112,7 +142,7 @@ export class MockBrain extends BaseBrainPort {
     ];
   }
 
-  private matchesTrigger(trigger: ScenarioTrigger, command: CommandEnvelope): boolean {
+  private matchesTrigger(trigger: ScenarioTrigger, command: CommandEnvelope, state: ThreadState): boolean {
     if (trigger.type !== command.type) {
       return false;
     }
@@ -138,8 +168,9 @@ export class MockBrain extends BaseBrainPort {
       }
     }
 
-    if (trigger.round !== undefined && command.type === 'answer_ask') {
-      if (this.clarificationRound !== trigger.round) {
+    if (trigger.round !== undefined) {
+      const payload = command.payload as Record<string, unknown>;
+      if (payload.askType === 'clarify' && state.clarificationRound !== trigger.round) {
         return false;
       }
     }
