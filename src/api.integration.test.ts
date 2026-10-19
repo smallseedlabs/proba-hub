@@ -12,6 +12,7 @@ import {
   createTestUser,
   postCommand,
   range,
+  waitForCommandStatus,
   waitForEvents,
 } from './test-helpers.js';
 
@@ -121,8 +122,9 @@ describe('API Integration Tests', () => {
 
       expect(response1.statusCode).toBe(202);
 
-      // Wait for at least one event
-      await waitForEvents(app, token, events => events.length > 0, { timeout: 5000 });
+      // Wait for this specific command row to be committed and processed.
+      // (Waiting for "any event" raced: earlier tests already produced events.)
+      await waitForCommandStatus(userId, clientMsgId, 'processed');
 
       // Second request with same clientMsgId should be idempotent
       const response2 = await app.inject({
@@ -135,6 +137,10 @@ describe('API Integration Tests', () => {
       });
 
       expect(response2.statusCode).toBe(202);
+      expect(JSON.parse(response2.body).status).toBe('accepted');
+
+      // The duplicate is processed asynchronously as a no-op; the row stays processed.
+      await waitForCommandStatus(userId, clientMsgId, 'processed');
 
       // Should only have one command record
       const commandCount = await pool.query(

@@ -62,6 +62,25 @@ export async function waitUntil(
   throw new Error(`waitUntil timeout after ${timeout}ms waiting for ${message}`);
 }
 
+/** Poll until the command row for (userId, clientMsgId) exists with `status`. */
+export async function waitForCommandStatus(
+  userId: string,
+  clientMsgId: string,
+  status: 'accepted' | 'processed',
+  { timeout = 5000, interval = 20 }: WaitForOptions = {}
+): Promise<void> {
+  await waitUntil(
+    async () => {
+      const result = await pool.query<{ status: string }>(
+        'SELECT status FROM commands WHERE user_id = $1 AND client_msg_id = $2',
+        [userId, clientMsgId]
+      );
+      return result.rows.some((row) => row.status === status);
+    },
+    { timeout, interval, message: `command ${clientMsgId} to be ${status}` }
+  );
+}
+
 export interface TestUser {
   token: string;
   userId: string;
