@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { initializeApp } from './app.js';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, onTestFinished } from 'vitest';
+import { buildApp } from './app.js';
 import { pool } from './db/client.js';
 import { randomUUID } from 'crypto';
 import { waitForEvents } from './test-helpers.js';
 
-const app = await initializeApp({ startBackgroundJobs: true });
+// Scenario injected via config (not process.env)
+const app = await buildApp({ startBackgroundJobs: true, brainScenario: 'happy_path' });
 
 describe('Answer Flow Integration Test', () => {
   let token: string;
@@ -45,7 +46,6 @@ describe('Answer Flow Integration Test', () => {
     await pool.query('DELETE FROM asks WHERE thread_id = $1', [threadId]);
     await pool.query('DELETE FROM outbox WHERE user_id = $1', [userId]);
     await pool.query('UPDATE event_sequences SET next_seq = 1 WHERE user_id = $1', [userId]);
-    process.env.MOCK_BRAIN_SCENARIO = 'happy_path';
   });
 
   it('should handle full answer flow: send message → get ask → answer ask → get ask_resolved → continue scenario', async () => {
@@ -164,10 +164,11 @@ describe('Answer Flow Integration Test', () => {
   });
 
   it('should surface errors as error events', async () => {
-    // Use malformed_output scenario
-    process.env.MOCK_BRAIN_SCENARIO = 'malformed_output';
+    // Use malformed_output scenario via an app with that scenario injected
+    const malformedApp = await buildApp({ startBackgroundJobs: true, brainScenario: 'malformed_output' });
+    onTestFinished(() => malformedApp.close());
 
-    const response = await app.inject({
+    const response = await malformedApp.inject({
       method: 'POST',
       url: '/v1/commands',
       headers: {

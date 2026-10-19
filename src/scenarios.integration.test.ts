@@ -1,10 +1,25 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { initializeApp } from './app.js';
+import type { FastifyInstance } from 'fastify';
+import { buildApp } from './app.js';
 import { pool } from './db/client.js';
 import { randomUUID } from 'crypto';
 import { waitForEvents } from './test-helpers.js';
 
-const app = await initializeApp({ startBackgroundJobs: true });
+// Base app for login; each scenario gets its own app with the scenario injected.
+const baseApp = await buildApp({ startBackgroundJobs: true });
+let app: FastifyInstance = baseApp;
+
+function useScenario(scenario: string) {
+  let scenarioApp: FastifyInstance;
+  beforeAll(async () => {
+    scenarioApp = await buildApp({ startBackgroundJobs: true, brainScenario: scenario });
+    app = scenarioApp;
+  });
+  afterAll(async () => {
+    app = baseApp;
+    await scenarioApp.close();
+  });
+}
 
 describe('Mock Brain Scenarios Integration Tests', () => {
   let token: string;
@@ -15,7 +30,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     // Clean up existing data
     await pool.query('TRUNCATE TABLE commands, events, asks, ask_questions, ask_answers, messages, goals, inbox_items, threads, sessions, users, outbox, event_sequences CASCADE');
 
-    const response = await app.inject({
+    const response = await baseApp.inject({
       method: 'POST',
       url: '/dev/login',
       payload: {
@@ -44,7 +59,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   }, 60000);
 
   afterAll(async () => {
-    await app.close();
+    await baseApp.close();
   });
 
   beforeEach(async () => {
@@ -77,9 +92,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   }
 
   describe('happy_path scenario', () => {
-    beforeAll(() => {
-      process.env.MOCK_BRAIN_SCENARIO = 'happy_path';
-    });
+    useScenario('happy_path');
 
     it('should complete full conversation flow: create_goal -> clarify -> plan -> approve -> decision', async () => {
       // Step 1: Create goal - wait for ask event
@@ -137,9 +150,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         },
         sentAt: new Date().toISOString(),
       });
-      
-      // Give async processing time to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
+
 
       events = await waitForNewEvents(1, step2Seq);
       const actionAsk = events.find((e: any) => 
@@ -174,9 +185,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   });
 
   describe('approval_edit scenario', () => {
-    beforeAll(() => {
-      process.env.MOCK_BRAIN_SCENARIO = 'approval_edit';
-    });
+    useScenario('approval_edit');
 
     it('should handle edited approval (+20% to +10%)', async () => {
       // Create goal triggers plan - wait for ask
@@ -242,9 +251,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   });
 
   describe('clarification_loop scenario', () => {
-    beforeAll(() => {
-      process.env.MOCK_BRAIN_SCENARIO = 'clarification_loop';
-    });
+    useScenario('clarification_loop');
 
     it('should handle multiple clarification rounds', async () => {
       // First clarify
@@ -318,9 +325,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   });
 
   describe('control commands', () => {
-    beforeAll(() => {
-      process.env.MOCK_BRAIN_SCENARIO = 'happy_path';
-    });
+    useScenario('happy_path');
 
     it('should handle pause control bypassing brain', async () => {
       await sendCommand({
@@ -378,9 +383,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   });
 
   describe('malformed_output scenario', () => {
-    beforeAll(() => {
-      process.env.MOCK_BRAIN_SCENARIO = 'malformed_output';
-    });
+    useScenario('malformed_output');
 
     it('should handle malformed brain output gracefully', async () => {
       await sendCommand({
