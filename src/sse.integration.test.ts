@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
-import { toJsonb } from './db/jsonb.js';
 
 const app = await initializeApp({ startBackgroundJobs: true });
 
