@@ -58,6 +58,15 @@ describe('SSE Integration Tests', () => {
       );
     }
     
+    // Ensure thread still exists
+    const threadCheck = await pool.query('SELECT id FROM threads WHERE id = $1', [threadId]);
+    if (threadCheck.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO threads (id, user_id, status) VALUES ($1, $2, $3)',
+        [threadId, userId, 'active']
+      );
+    }
+    
     await pool.query('DELETE FROM commands WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM events WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM outbox WHERE user_id = $1', [userId]);
