@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { fastify as app } from './server.js';
+import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
+
+const app = await initializeApp();
 
 describe('API Integration Tests', () => {
   let token: string;
