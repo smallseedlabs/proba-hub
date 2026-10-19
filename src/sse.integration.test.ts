@@ -49,6 +49,15 @@ describe('SSE Integration Tests', () => {
   });
 
   beforeEach(async () => {
+    // Ensure user still exists (in case another test truncated)
+    const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (userCheck.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO users (id, email, name) VALUES ($1, $2, $3)',
+        [userId, 'sse-test@example.com', 'SSE Test User']
+      );
+    }
+    
     await pool.query('DELETE FROM commands WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM events WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM outbox WHERE user_id = $1', [userId]);
