@@ -26,10 +26,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step1Outputs = await brain.process(step1Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -55,10 +54,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step2Outputs = await brain.process(step2Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -82,10 +80,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step3Outputs = await brain.process(step3Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -110,10 +107,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step4Outputs = await brain.process(step4Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -147,10 +143,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step1Outputs = await brain.process(step1Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -176,10 +171,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step2Outputs = await brain.process(step2Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -205,10 +199,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step3Outputs = await brain.process(step3Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -242,10 +235,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step1Outputs = await brain.process(step1Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -269,10 +261,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step2Outputs = await brain.process(step2Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
@@ -297,10 +288,9 @@ describe('MockBrain Direct Unit Tests', () => {
       const step3Outputs = await brain.process(step3Command, {
         userId: 'user1',
         threadId,
-        goal: null,
+        goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        conversationHistory: [],
         metrics: {},
       });
 
