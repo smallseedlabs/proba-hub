@@ -123,7 +123,8 @@ export class CommandProcessor {
         const answerPayload = envelope.payload as AnswerAskPayload;
         const askType = (envelope.payload as unknown as Record<string, unknown>).askType;
         logger.info({ askId: answerPayload.askId, askType }, 'Handling answer_ask command');
-        await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
+        const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
+        events.push(askResolvedEvent);
         
         // After recording the answer, invoke brain to generate next step
         const context = await this.buildContext(client, userId, envelope.threadId);
@@ -401,7 +402,7 @@ export class CommandProcessor {
     userId: string,
     threadId: string,
     payload: AnswerAskPayload
-  ): Promise<void> {
+  ): Promise<Event> {
     await client.query(
       `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1 WHERE id = $2`,
       [JSON.stringify(payload), payload.askId]
@@ -425,6 +426,7 @@ export class CommandProcessor {
     
     const event = eventResult.rows[0];
     await this.addToOutbox(client, userId, event.id);
+    return event;
   }
 
   private async createGoal(

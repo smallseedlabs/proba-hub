@@ -35,7 +35,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
       expect(step1Outputs).toHaveLength(1);
       expect(step1Outputs[0].type).toBe('clarify');
 
@@ -63,7 +62,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
       expect(step2Outputs).toHaveLength(1);
       expect(step2Outputs[0].type).toBe('plan');
 
@@ -89,7 +87,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
       expect(step3Outputs).toHaveLength(1);
       expect(step3Outputs[0].type).toBe('tool_call');
 
@@ -116,7 +113,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 4 outputs:', step4Outputs.map(o => o.type));
       expect(step4Outputs).toHaveLength(2);
       expect(step4Outputs[0].type).toBe('reply');
       expect(step4Outputs[1].type).toBe('decision');
@@ -152,7 +148,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
       expect(step1Outputs).toHaveLength(1);
       expect(step1Outputs[0].type).toBe('clarify');
 
@@ -180,7 +175,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
       expect(step2Outputs).toHaveLength(1);
       expect(step2Outputs[0].type).toBe('clarify');
 
@@ -208,7 +202,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
       expect(step3Outputs).toHaveLength(2);
       expect(step3Outputs[0].type).toBe('reply');
       expect(step3Outputs[1].type).toBe('plan');
@@ -244,7 +237,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
       expect(step1Outputs).toHaveLength(1);
       expect(step1Outputs[0].type).toBe('plan');
 
@@ -270,7 +262,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
       expect(step2Outputs).toHaveLength(1);
       expect(step2Outputs[0].type).toBe('tool_call');
 
@@ -297,7 +288,6 @@ describe('MockBrain Direct Unit Tests', () => {
         client: mockClient,
       });
 
-      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
       expect(step3Outputs).toHaveLength(2);
       expect(step3Outputs[0].type).toBe('reply');
       expect(step3Outputs[1].type).toBe('decision');
