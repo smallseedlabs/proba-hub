@@ -159,6 +159,7 @@ export class CommandProcessor {
         // After approving plan, invoke brain to generate next step
         const context = await this.buildContext(client, userId, envelope.threadId);
         const brainOutputs = await this.brain.process(envelope, context);
+        logger.debug({ outputCount: brainOutputs.length, outputs: brainOutputs }, 'Brain outputs after approve_plan');
         
         for (const output of brainOutputs) {
           if (!isBrainOutput(output)) {
@@ -299,18 +300,29 @@ export class CommandProcessor {
     
     let uiPayloadId: string | undefined;
     if ('ui' in eventEnvelope && eventEnvelope.ui) {
+      const propsValue = typeof eventEnvelope.ui.props === 'string' 
+        ? eventEnvelope.ui.props 
+        : JSON.stringify(eventEnvelope.ui.props);
+      const actionsValue = 'actions' in eventEnvelope.ui && eventEnvelope.ui.actions
+        ? (typeof eventEnvelope.ui.actions === 'string' ? eventEnvelope.ui.actions : JSON.stringify(eventEnvelope.ui.actions))
+        : null;
+        
       const uiResult = await client.query<{ id: string }>(
         'INSERT INTO ui_payloads (component, version, props, actions) VALUES ($1, $2, $3, $4) RETURNING id',
         [
           eventEnvelope.ui.component,
           eventEnvelope.ui.version,
-          eventEnvelope.ui.props,
-          'actions' in eventEnvelope.ui ? eventEnvelope.ui.actions : null,
+          propsValue,
+          actionsValue,
         ]
       );
       uiPayloadId = uiResult.rows[0].id;
     }
 
+    const payloadValue = typeof eventEnvelope.payload === 'string'
+      ? eventEnvelope.payload
+      : JSON.stringify(eventEnvelope.payload);
+      
     const eventResult = await client.query<Event>(
       `INSERT INTO events (user_id, seq, type, thread_id, payload, ui_payload_id, fallback_text)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -322,7 +334,7 @@ export class CommandProcessor {
         seq,
         eventEnvelope.type,
         threadId,
-        eventEnvelope.payload,
+        payloadValue,
         uiPayloadId,
         'fallbackText' in eventEnvelope ? eventEnvelope.fallbackText : null,
       ]
@@ -356,6 +368,13 @@ export class CommandProcessor {
     threadId: string,
     payload: Record<string, unknown>
   ): Promise<void> {
+    const questionsValue = typeof payload.questions === 'string' 
+      ? payload.questions 
+      : JSON.stringify(payload.questions);
+    const costEffectValue = payload.costEffect 
+      ? (typeof payload.costEffect === 'string' ? payload.costEffect : JSON.stringify(payload.costEffect))
+      : null;
+    
     await client.query(
       `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -367,13 +386,20 @@ export class CommandProcessor {
         payload.description,
         payload.blocking,
         payload.risk,
-        payload.costEffect ? JSON.stringify(payload.costEffect) : null,
-        JSON.stringify(payload.questions),
+        costEffectValue,
+        questionsValue,
       ]
     );
 
     const questions = payload.questions as Array<Record<string, unknown>>;
     for (const question of questions) {
+      const optionsValue = question.options 
+        ? (typeof question.options === 'string' ? question.options : JSON.stringify(question.options))
+        : null;
+      const constraintsValue = question.constraints
+        ? (typeof question.constraints === 'string' ? question.constraints : JSON.stringify(question.constraints))
+        : null;
+        
       await client.query(
         `INSERT INTO ask_questions (ask_id, question_id, type, label, required, options, constraints)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -383,8 +409,8 @@ export class CommandProcessor {
           question.type,
           question.label,
           question.required ?? true,
-          question.options ? JSON.stringify(question.options) : null,
-          question.constraints ? JSON.stringify(question.constraints) : null,
+          optionsValue,
+          constraintsValue,
         ]
       );
     }
@@ -403,9 +429,10 @@ export class CommandProcessor {
     threadId: string,
     payload: AnswerAskPayload
   ): Promise<Event> {
+    const answerValue = typeof payload === 'string' ? payload : JSON.stringify(payload);
     await client.query(
       `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1 WHERE id = $2`,
-      [JSON.stringify(payload), payload.askId]
+      [answerValue, payload.askId]
     );
 
     await client.query(
@@ -443,8 +470,8 @@ export class CommandProcessor {
         threadId,
         payload.title,
         payload.description,
-        JSON.stringify(payload.constraints),
-        JSON.stringify(payload.budget),
+        payload.constraints ? (typeof payload.constraints === 'string' ? payload.constraints : JSON.stringify(payload.constraints)) : null,
+        typeof payload.budget === 'string' ? payload.budget : JSON.stringify(payload.budget),
       ]
     );
   }

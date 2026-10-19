@@ -125,7 +125,8 @@ export class MockBrain extends BaseBrainPort {
             scenario: this.scenarioName, 
             step: i, 
             trigger: step.trigger,
-            outputCount: outputs.length 
+            outputCount: outputs.length,
+            outputTypes: outputs.map(o => o.type)
           }, 
           'Matched scenario step'
         );
