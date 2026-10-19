@@ -130,6 +130,27 @@ npm run seed
 npm run dev
 ```
 
+If ports 5432/6379/3000 are already taken on your machine, override the host
+ports (and point `DATABASE_URL`/`REDIS_URL` in your `.env` at them):
+
+```bash
+POSTGRES_HOST_PORT=55432 REDIS_HOST_PORT=56379 docker compose up -d postgres redis
+```
+
+### Running the integration tests locally
+
+Integration tests run against real Postgres and Redis (never point them at a
+database you care about: they `TRUNCATE` tables).
+
+```bash
+docker compose up -d postgres redis
+docker compose exec postgres psql -U proba -d proba_hub -c "CREATE DATABASE proba_hub_test"
+export DATABASE_URL=postgresql://proba:proba@localhost:5432/proba_hub_test
+export REDIS_URL=redis://localhost:6379
+npm run migrate
+npm run test:integration       # or test:integration:ci (fails on any skipped test)
+```
+
 ### Building
 
 ```bash
@@ -207,6 +228,14 @@ Response:
 **GET** `/v1/events`
 
 Server-Sent Events stream. Supports `Last-Event-ID` header for reconnection.
+
+Delivery guarantees per connection: events are delivered in `seq` order with no
+duplicates and no gaps. The live listener is registered before the
+`Last-Event-ID` replay is read; live events queue behind the replay; any event
+with `seq <= lastSent` is dropped and a jump in `seq` is back-filled from
+Postgres. Heartbeats are SSE comments (`: heartbeat`) every
+`SSE_HEARTBEAT_INTERVAL_MS`; the stream starts with a `: connected` comment.
+A malformed `Last-Event-ID` is rejected with `400`.
 
 ```bash
 curl -N http://localhost:3000/v1/events?token=<token>
@@ -308,7 +337,9 @@ curl -X POST http://localhost:3000/v1/commands \
 - `npm run lint` - Run ESLint
 - `npm run typecheck` - TypeScript type checking
 - `npm test` - Run unit tests
-- `npm run test:integration` - Run integration tests
+- `npm run test:integration` - Run integration tests (needs Postgres + Redis)
+- `npm run test:ci` / `npm run test:integration:ci` - Same, plus a JSON report check
+  that fails on any skipped/todo test and requires the SSE and concurrency suites
 - `npm run migrate` - Run database migrations
 - `npm run seed` - Seed demo data
 
@@ -322,7 +353,8 @@ The mock brain uses YAML scenario files in `src/brain/scenarios/`:
 - `clarification_loop.yaml` - Multiple clarification rounds (capped at 2)
 - `malformed_output.yaml` - Simulates brain error handling
 
-Set via `MOCK_BRAIN_SCENARIO` environment variable.
+Set via `MOCK_BRAIN_SCENARIO` environment variable, or inject it in code/tests:
+`buildApp({ brainScenario: 'approval_edit' })`.
 
 ## Deployment
 

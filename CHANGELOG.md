@@ -5,6 +5,36 @@ All notable changes to proba-hub will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- SSE: listener is registered before the Last-Event-ID replay, so events committed
+  during the replay are no longer lost; per-connection seq de-duplication and
+  Postgres gap-fill give in-order, exactly-once delivery
+- SSE: multiple connections per user are supported; closing one no longer
+  unregisters the others; streams are ended on app shutdown
+- SSE: response is hijacked from Fastify and keeps CORS headers
+- Outbox relay: publisher is single-flight, ordered by (user, seq) and uses
+  `FOR UPDATE SKIP LOCKED`; relay is kicked after COMMIT instead of before
+- Commands: payloads are validated against their per-type schema (invalid
+  payloads are rejected with `validation_error` instead of failing in the DB)
+- Commands: idempotency is race-safe (`INSERT ... ON CONFLICT DO NOTHING`)
+- Commands: failed brain outputs roll back to a savepoint so the error event
+  and command row still commit
+- Ask expiry: user lookup joined through threads (asks has no user_id); guarded
+  against double expiry
+- Polling: non-numeric `after` returns 400
+
+### Changed
+
+- `buildApp(options)` factory replaces the module-level singleton; brain scenario
+  and SSE heartbeat are injectable (tests no longer mutate `process.env`)
+- `@smallseedlabs/proba-protocol` pinned to the main merge commit of
+  proba-protocol PR #3 (`c643d52`); switch to `#v0.1.2` once tagged
+- Docker Compose host ports are overridable (`POSTGRES_HOST_PORT`, `REDIS_HOST_PORT`, `HUB_HOST_PORT`)
+- CI fails on any skipped/todo test and requires the SSE and concurrency suites
+
 ## [0.1.0] - 2024-10-19
 
 ### Added
