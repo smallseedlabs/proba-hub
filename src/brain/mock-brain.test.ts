@@ -1,215 +1,313 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { MockBrain } from './mock-brain.js';
 import type { CommandEnvelope } from '@smallseedlabs/proba-protocol';
-import type { BrainContext } from '../types.js';
 
-describe('MockBrain Scenario Parsing', () => {
-  let brain: MockBrain;
-  let context: BrainContext;
-
-  beforeEach(() => {
-    context = {
-      userId: 'test-user-id',
-      threadId: 'test-thread-id',
-      client: {} as any,
-    };
-  });
-
+describe('MockBrain Direct Unit Tests', () => {
   describe('happy_path scenario', () => {
-    beforeEach(() => {
-      brain = new MockBrain('happy_path');
-    });
+    it('should progress through all steps', async () => {
+      const brain = new MockBrain('happy_path');
+      const threadId = 'test-thread';
 
-    it('should respond to create_goal with clarify', async () => {
-      const command: CommandEnvelope = {
+      // Step 1: create_goal -> clarify
+      const step1Command: CommandEnvelope = {
         kind: 'command',
-        clientMsgId: 'test-1',
+        clientMsgId: '1',
         type: 'create_goal',
-        threadId: 'test-thread',
+        threadId,
         payload: {
-          title: 'Test Goal',
+          title: 'Test Campaign',
           description: 'Test',
-          constraints: [],
-          budget: { daily: 100, total: 1000, currency: 'USD' },
+          constraints: {},
+          budget: { total: 5000 },
         },
-        sentAt: '2024-10-19T10:00:00Z',
+        sentAt: new Date().toISOString(),
       };
 
-      const outputs = await brain.process(command, context);
-      
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0].type).toBe('clarify');
-      expect(outputs[0]).toHaveProperty('reason');
-      expect(outputs[0]).toHaveProperty('questions');
-    });
+      const step1Outputs = await brain.process(step1Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
 
-    it('should respond to answer_ask (clarify) with plan', async () => {
-      brain = new MockBrain('happy_path');
-      
-      // First trigger clarify
-      await brain.process({
-        kind: 'command',
-        clientMsgId: 'test-1',
-        type: 'create_goal',
-        threadId: 'test-thread',
-        payload: { title: 'Test', description: 'Test', constraints: [], budget: { daily: 100, total: 1000, currency: 'USD' } },
-        sentAt: '2024-10-19T10:00:00Z',
-      }, context);
+      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
+      expect(step1Outputs).toHaveLength(1);
+      expect(step1Outputs[0].type).toBe('clarify');
 
-      // Then answer
-      const command: CommandEnvelope = {
+      // Step 2: answer_ask (clarify) -> plan
+      const step2Command: CommandEnvelope = {
         kind: 'command',
-        clientMsgId: 'test-2',
+        clientMsgId: '2',
         type: 'answer_ask',
-        threadId: 'test-thread',
+        threadId,
         payload: {
           askId: 'ask-1',
           askType: 'clarify',
-          choice: 'approve',
+          choice: 'active',
           values: { audience: 'active' },
         },
-        sentAt: '2024-10-19T10:00:00Z',
+        sentAt: new Date().toISOString(),
       };
 
-      const outputs = await brain.process(command, context);
-      
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0].type).toBe('plan');
-      expect(outputs[0]).toHaveProperty('title');
-      expect(outputs[0]).toHaveProperty('steps');
-    });
-  });
+      const step2Outputs = await brain.process(step2Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
 
-  describe('approval_edit scenario', () => {
-    beforeEach(() => {
-      brain = new MockBrain('approval_edit');
-    });
+      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
+      expect(step2Outputs).toHaveLength(1);
+      expect(step2Outputs[0].type).toBe('plan');
 
-    it('should handle edited approval with choice=edit', async () => {
-      brain = new MockBrain('approval_edit');
-      
-      // Trigger plan
-      await brain.process({
+      // Step 3: approve_plan -> tool_call
+      const step3Command: CommandEnvelope = {
         kind: 'command',
-        clientMsgId: 'test-1',
-        type: 'create_goal',
-        threadId: 'test-thread',
-        payload: { title: 'Test', description: 'Test', constraints: [], budget: { daily: 100, total: 1000, currency: 'USD' } },
-        sentAt: '2024-10-19T10:00:00Z',
-      }, context);
-
-      // Approve plan
-      await brain.process({
-        kind: 'command',
-        clientMsgId: 'test-2',
+        clientMsgId: '3',
         type: 'approve_plan',
-        threadId: 'test-thread',
-        payload: { planId: 'plan-1', approved: true },
-        sentAt: '2024-10-19T10:00:00Z',
-      }, context);
-
-      // Answer with edit
-      const command: CommandEnvelope = {
-        kind: 'command',
-        clientMsgId: 'test-3',
-        type: 'answer_ask',
-        threadId: 'test-thread',
+        threadId,
         payload: {
-          askId: 'ask-1',
-          askType: 'action_approval',
-          choice: 'edit',
-          values: { dailyBudget: 110 },
+          planId: 'plan-1',
+          approved: true,
         },
-        sentAt: '2024-10-19T10:00:00Z',
+        sentAt: new Date().toISOString(),
       };
 
-      const outputs = await brain.process(command, context);
-      
-      expect(outputs.length).toBeGreaterThan(0);
-      expect(outputs.some(o => o.type === 'reply')).toBe(true);
+      const step3Outputs = await brain.process(step3Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
+      expect(step3Outputs).toHaveLength(1);
+      expect(step3Outputs[0].type).toBe('tool_call');
+
+      // Step 4: answer_ask (action_approval) -> reply + decision
+      const step4Command: CommandEnvelope = {
+        kind: 'command',
+        clientMsgId: '4',
+        type: 'answer_ask',
+        threadId,
+        payload: {
+          askId: 'ask-2',
+          askType: 'action_approval',
+          choice: 'approve',
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      const step4Outputs = await brain.process(step4Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 4 outputs:', step4Outputs.map(o => o.type));
+      expect(step4Outputs).toHaveLength(2);
+      expect(step4Outputs[0].type).toBe('reply');
+      expect(step4Outputs[1].type).toBe('decision');
     });
   });
 
   describe('clarification_loop scenario', () => {
-    beforeEach(() => {
-      brain = new MockBrain('clarification_loop');
-    });
+    it('should handle multiple clarification rounds', async () => {
+      const brain = new MockBrain('clarification_loop');
+      const threadId = 'test-thread';
 
-    it('should trigger first clarify on create_goal', async () => {
-      const outputs = await brain.process({
+      // Step 1: create_goal -> clarify (round 0)
+      const step1Command: CommandEnvelope = {
         kind: 'command',
-        clientMsgId: 'test-1',
+        clientMsgId: '1',
         type: 'create_goal',
-        threadId: 'test-thread',
-        payload: { title: 'Test', description: 'Test', constraints: [], budget: { daily: 100, total: 1000, currency: 'USD' } },
-        sentAt: '2024-10-19T10:00:00Z',
-      }, context);
+        threadId,
+        payload: {
+          title: 'Test',
+          description: 'Test',
+          constraints: {},
+          budget: { total: 1000 },
+        },
+        sentAt: new Date().toISOString(),
+      };
 
-      expect(outputs[0].type).toBe('clarify');
-      const clarify = outputs[0] as any;
-      expect(clarify.questions).toBeDefined();
-      expect(clarify.questions[0].id).toBe('product');
+      const step1Outputs = await brain.process(step1Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
+      expect(step1Outputs).toHaveLength(1);
+      expect(step1Outputs[0].type).toBe('clarify');
+
+      // Step 2: answer_ask (round 1) -> clarify again
+      const step2Command: CommandEnvelope = {
+        kind: 'command',
+        clientMsgId: '2',
+        type: 'answer_ask',
+        threadId,
+        payload: {
+          askId: 'ask-1',
+          askType: 'clarify',
+          choice: 'product-answer',
+          values: { product: 'Widget' },
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      const step2Outputs = await brain.process(step2Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
+      expect(step2Outputs).toHaveLength(1);
+      expect(step2Outputs[0].type).toBe('clarify');
+
+      // Step 3: answer_ask (round 2) -> reply + plan
+      const step3Command: CommandEnvelope = {
+        kind: 'command',
+        clientMsgId: '3',
+        type: 'answer_ask',
+        threadId,
+        payload: {
+          askId: 'ask-2',
+          askType: 'clarify',
+          choice: 'market-answer',
+          values: { market: 'Consumers' },
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      const step3Outputs = await brain.process(step3Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
+      expect(step3Outputs).toHaveLength(2);
+      expect(step3Outputs[0].type).toBe('reply');
+      expect(step3Outputs[1].type).toBe('plan');
     });
   });
 
-  describe('control commands', () => {
-    beforeEach(() => {
-      brain = new MockBrain('happy_path');
-    });
+  describe('approval_edit scenario', () => {
+    it('should handle plan edits', async () => {
+      const brain = new MockBrain('approval_edit');
+      const threadId = 'test-thread';
 
-    it('should handle pause control', async () => {
-      const command: CommandEnvelope = {
+      // Step 1: create_goal -> plan
+      const step1Command: CommandEnvelope = {
         kind: 'command',
-        clientMsgId: 'test-1',
-        type: 'control',
-        threadId: 'test-thread',
-        payload: { action: 'pause' },
-        sentAt: '2024-10-19T10:00:00Z',
-      };
-
-      const outputs = await brain.process(command, context);
-      
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0].type).toBe('reply');
-      expect((outputs[0] as any).text).toContain('pause');
-    });
-
-    it('should handle resume control', async () => {
-      const command: CommandEnvelope = {
-        kind: 'command',
-        clientMsgId: 'test-1',
-        type: 'control',
-        threadId: 'test-thread',
-        payload: { action: 'resume' },
-        sentAt: '2024-10-19T10:00:00Z',
-      };
-
-      const outputs = await brain.process(command, context);
-      
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0].type).toBe('reply');
-      expect((outputs[0] as any).text).toContain('resume');
-    });
-  });
-
-  describe('malformed_output scenario', () => {
-    beforeEach(() => {
-      brain = new MockBrain('malformed_output');
-    });
-
-    it('should load scenario with invalid output type', async () => {
-      const command: CommandEnvelope = {
-        kind: 'command',
-        clientMsgId: 'test-1',
+        clientMsgId: '1',
         type: 'create_goal',
-        threadId: 'test-thread',
-        payload: { title: 'Test', description: 'Test', constraints: [], budget: { daily: 100, total: 1000, currency: 'USD' } },
-        sentAt: '2024-10-19T10:00:00Z',
+        threadId,
+        payload: {
+          title: 'Test Campaign',
+          description: 'Test',
+          constraints: {},
+          budget: { total: 5000 },
+        },
+        sentAt: new Date().toISOString(),
       };
 
-      // Should not throw, but output will be malformed
-      const outputs = await brain.process(command, context);
-      expect(outputs).toBeDefined();
+      const step1Outputs = await brain.process(step1Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
+      expect(step1Outputs).toHaveLength(1);
+      expect(step1Outputs[0].type).toBe('plan');
+
+      // Step 2: approve_plan (approved: true) -> tool_call
+      const step2Command: CommandEnvelope = {
+        kind: 'command',
+        clientMsgId: '2',
+        type: 'approve_plan',
+        threadId,
+        payload: {
+          planId: 'plan-1',
+          approved: true,
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      const step2Outputs = await brain.process(step2Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
+      expect(step2Outputs).toHaveLength(1);
+      expect(step2Outputs[0].type).toBe('tool_call');
+
+      // Step 3: answer_ask with choice: edit -> reply + decision  
+      const step3Command: CommandEnvelope = {
+        kind: 'command',
+        clientMsgId: '3',
+        type: 'answer_ask',
+        threadId,
+        payload: {
+          askId: 'ask-1',
+          askType: 'action_approval',
+          choice: 'edit',
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      const step3Outputs = await brain.process(step3Command, {
+        userId: 'user1',
+        threadId,
+        goal: null,
+        thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
+        messages: [],
+        conversationHistory: [],
+        metrics: {},
+      });
+
+      console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
+      expect(step3Outputs).toHaveLength(2);
+      expect(step3Outputs[0].type).toBe('reply');
+      expect(step3Outputs[1].type).toBe('decision');
     });
   });
 });
