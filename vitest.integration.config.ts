@@ -7,11 +7,7 @@ export default defineConfig({
     include: ['src/**/*.integration.test.ts'],
     testTimeout: 30000,
     hookTimeout: 60000,
-    poolOptions: {
-      threads: {
-        singleThread: true, // Run tests sequentially to avoid database conflicts
-      },
-    },
+    fileParallelism: false, // Run test files sequentially
     env: {
       OUTBOX_POLL_MS: '50', // Fast polling for tests
     }
