@@ -54,12 +54,17 @@ describe('SSE Integration Tests', () => {
 
   describe('GET /v1/events (SSE)', () => {
     it('should stream events with proper SSE format', async () => {
-      // Create some events first
+      // Create events through outbox so they're properly associated with user
       for (let i = 1; i <= 3; i++) {
-        await pool.query(
+        const eventResult = await pool.query(
           `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-           VALUES ($1, $2, 'status', $3, $4, NOW())`,
+           VALUES ($1, $2, 'status', $3, $4, NOW())
+           RETURNING id`,
           [userId, i, threadId, JSON.stringify({ message: `Event ${i}` })]
+        );
+        await pool.query(
+          'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
+          [userId, eventResult.rows[0].id]
         );
       }
 
@@ -90,10 +95,15 @@ describe('SSE Integration Tests', () => {
     it('should resume from Last-Event-ID', async () => {
       // Create events 1-5
       for (let i = 1; i <= 5; i++) {
-        await pool.query(
+        const eventResult = await pool.query(
           `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-           VALUES ($1, $2, 'status', $3, $4, NOW())`,
+           VALUES ($1, $2, 'status', $3, $4, NOW())
+           RETURNING id`,
           [userId, i, threadId, JSON.stringify({ message: `Event ${i}` })]
+        );
+        await pool.query(
+          'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
+          [userId, eventResult.rows[0].id]
         );
       }
 
@@ -124,10 +134,15 @@ describe('SSE Integration Tests', () => {
 
     it('should not send catchup if Last-Event-ID is current', async () => {
       // Create event 1
-      await pool.query(
+      const eventResult = await pool.query(
         `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-         VALUES ($1, $2, 'status', $3, $4, NOW())`,
+         VALUES ($1, $2, 'status', $3, $4, NOW())
+         RETURNING id`,
         [userId, 1, threadId, JSON.stringify({ message: 'Event 1' })]
+      );
+      await pool.query(
+        'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
+        [userId, eventResult.rows[0].id]
       );
 
       // Connect with Last-Event-ID = 1 (current)
@@ -199,10 +214,15 @@ describe('SSE Integration Tests', () => {
     beforeEach(async () => {
       // Create test events
       for (let i = 1; i <= 5; i++) {
-        await pool.query(
+        const eventResult = await pool.query(
           `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-           VALUES ($1, $2, 'message', $3, $4, NOW())`,
+           VALUES ($1, $2, 'message', $3, $4, NOW())
+           RETURNING id`,
           [userId, i, threadId, JSON.stringify({ text: `Message ${i}` })]
+        );
+        await pool.query(
+          'INSERT INTO outbox (user_id, event_id, published) VALUES ($1, $2, true)',
+          [userId, eventResult.rows[0].id]
         );
       }
     });

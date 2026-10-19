@@ -18,6 +18,7 @@
     "test:integration": "NODE_ENV=test vitest run --config vitest.integration.config.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
+    "validate:scenarios": "tsx scripts/validate-scenarios.ts",
     "docker:build": "docker build -t proba-hub:latest .",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",

@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
 import { kickOutboxRelay } from './outbox-relay.js';
+import { isBrainOutput } from '@smallseedlabs/proba-protocol';
 import type { BrainPort, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
 import type { 
   CommandEnvelope, 
@@ -65,6 +66,28 @@ export class CommandProcessor {
       const events: Event[] = [];
       
       for (const output of brainOutputs) {
+        // Validate brain output against protocol schema BEFORE any DB writes
+        if (!isBrainOutput(output)) {
+          logger.error({ output }, 'Invalid brain output - does not match protocol schema');
+          
+          try {
+            const seq = await this.getNextSeq(client, userId);
+            const errorEvent = await client.query<Event>(
+              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+               VALUES ($1, $2, 'error', $3, $4, NOW())
+               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                         payload, created_at as "createdAt"`,
+              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+            );
+            const errorEventRow = errorEvent.rows[0];
+            events.push(errorEventRow);
+            await this.addToOutbox(client, userId, errorEventRow.id);
+          } catch (innerError) {
+            logger.error({ error: innerError }, 'Failed to create error event for invalid output');
+          }
+          continue;
+        }
+
         try {
           const event = await this.processBrainOutput(
             client,

@@ -66,13 +66,16 @@ export async function commandRoutes(fastify: FastifyInstance) {
         );
       }
 
+      // Each command gets its own async execution context to ensure transaction isolation
       setImmediate(async () => {
         try {
+          // processCommand creates its own transaction, so failures won't affect other commands
           await getProcessor().processCommand(request.user!.id, envelope);
         } catch (error) {
+          // Log but don't crash - the error should be surfaced as an error event
           logger.error(
             { error, userId: request.user!.id, clientMsgId: envelope.clientMsgId },
-            'Command processing failed'
+            'Command processing failed in background'
           );
         }
       });
