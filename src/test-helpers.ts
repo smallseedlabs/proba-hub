@@ -1,12 +1,10 @@
-import type { FastifyInstance } from 'fastify';
-
 interface WaitForOptions {
   timeout?: number;
   interval?: number;
 }
 
 export async function waitForEvents(
-  app: FastifyInstance,
+  app: any,
   token: string,
   predicate: (events: any[]) => boolean,
   options: WaitForOptions = {}

@@ -67,17 +67,6 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     return response;
   }
 
-  async function getEvents(afterSeq = 0) {
-    const response = await app.inject({
-      method: 'GET',
-      url: `/v1/events?after=${afterSeq}`,
-      headers: {
-        authorization: `Bearer ${token}`,
-      },
-    });
-    return JSON.parse(response.body);
-  }
-
   async function waitForNewEvents(minCount: number = 1, fromSeq: number = 0): Promise<any[]> {
     return waitForEvents(
       app,

@@ -6,7 +6,6 @@ import { config } from '../config.js';
 import type { EventEnvelope } from '@smallseedlabs/proba-protocol';
 
 const CHANNEL = 'proba:events';
-let publisherInterval: NodeJS.Timeout | null = null;
 
 export function startOutboxRelay(): void {
   startPublisher();
@@ -86,7 +85,8 @@ async function publishPendingEvents(): Promise<void> {
 }
 
 function startPublisher(): void {
-  publisherInterval = setInterval(() => {
+  // Start polling for pending events
+  setInterval(() => {
     publishPendingEvents();
   }, config.outbox.pollIntervalMs);
 }
