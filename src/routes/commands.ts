@@ -2,7 +2,6 @@ import type { FastifyInstance } from 'fastify';
 import { commandEnvelopeSchema, type CommandEnvelope } from '@smallseedlabs/proba-protocol';
 import { CommandProcessor } from '../services/command-processor.js';
 import { MockBrain } from '../brain/mock-brain.js';
-import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { pool } from '../db/client.js';
 import type { CommandResult } from '../types.js';
