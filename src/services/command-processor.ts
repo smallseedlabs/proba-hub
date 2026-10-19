@@ -123,11 +123,62 @@ export class CommandProcessor {
         const answerPayload = envelope.payload as AnswerAskPayload;
         const askType = (envelope.payload as unknown as Record<string, unknown>).askType;
         logger.info({ askId: answerPayload.askId, askType }, 'Handling answer_ask command');
-        await this.handleAskAnswer(client, answerPayload);
+        await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
+        
+        // After recording the answer, invoke brain to generate next step
+        const context = await this.buildContext(client, userId, envelope.threadId);
+        const brainOutputs = await this.brain.process(envelope, context);
+        
+        for (const output of brainOutputs) {
+          if (!isBrainOutput(output)) {
+            logger.error({ output }, 'Invalid brain output after answer_ask');
+            const seq = await this.getNextSeq(client, userId);
+            const errorEvent = await client.query<Event>(
+              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+               VALUES ($1, $2, 'error', $3, $4, NOW())
+               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                         payload, created_at as "createdAt"`,
+              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+            );
+            events.push(errorEvent.rows[0]);
+            await this.addToOutbox(client, userId, errorEvent.rows[0].id);
+            continue;
+          }
+          
+          const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
+          events.push(event);
+          await this.addToOutbox(client, userId, event.id);
+        }
       }
 
       if (envelope.type === 'approve_plan') {
-        logger.info({ planId: (envelope.payload as Record<string, unknown>).planId }, 'Handling approve_plan command');
+        const planPayload = envelope.payload as Record<string, unknown>;
+        logger.info({ planId: planPayload.planId }, 'Handling approve_plan command');
+        
+        // After approving plan, invoke brain to generate next step
+        const context = await this.buildContext(client, userId, envelope.threadId);
+        const brainOutputs = await this.brain.process(envelope, context);
+        
+        for (const output of brainOutputs) {
+          if (!isBrainOutput(output)) {
+            logger.error({ output }, 'Invalid brain output after approve_plan');
+            const seq = await this.getNextSeq(client, userId);
+            const errorEvent = await client.query<Event>(
+              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+               VALUES ($1, $2, 'error', $3, $4, NOW())
+               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                         payload, created_at as "createdAt"`,
+              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+            );
+            events.push(errorEvent.rows[0]);
+            await this.addToOutbox(client, userId, errorEvent.rows[0].id);
+            continue;
+          }
+          
+          const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
+          events.push(event);
+          await this.addToOutbox(client, userId, event.id);
+        }
       }
 
       if (envelope.type === 'create_goal') {
@@ -347,6 +398,8 @@ export class CommandProcessor {
 
   private async handleAskAnswer(
     client: PoolClient,
+    userId: string,
+    threadId: string,
     payload: AnswerAskPayload
   ): Promise<void> {
     await client.query(
@@ -360,14 +413,18 @@ export class CommandProcessor {
       [payload.askId]
     );
 
-    const seq = await this.getNextSeq(client, (await client.query('SELECT user_id FROM asks WHERE id = $1', [payload.askId])).rows[0].user_id);
+    const seq = await this.getNextSeq(client, userId);
     
-    await client.query(
-      `INSERT INTO events (user_id, seq, type, thread_id, payload)
-       SELECT a.thread_id, $1, 'ask_resolved', a.thread_id, $2
-       FROM asks a WHERE a.id = $3`,
-      [seq, JSON.stringify({ askId: payload.askId, resolution: 'answered' }), payload.askId]
+    const eventResult = await client.query<Event>(
+      `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+       VALUES ($1, $2, 'ask_resolved', $3, $4, NOW())
+       RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                 payload, created_at as "createdAt"`,
+      [userId, seq, threadId, JSON.stringify({ askId: payload.askId, resolution: 'answered' })]
     );
+    
+    const event = eventResult.rows[0];
+    await this.addToOutbox(client, userId, event.id);
   }
 
   private async createGoal(
