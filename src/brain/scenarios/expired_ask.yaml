@@ -1,0 +1,21 @@
+name: expired_ask
+description: Ask expires and applies default action
+
+steps:
+  - trigger:
+      type: create_goal
+    outputs:
+      - type: clarify
+        reason: Need approval before proceeding
+        questions:
+          - id: approval
+            text: Should I proceed?
+            type: confirm
+        expiresIn: 5000
+        onExpire: default
+
+  - trigger:
+      type: ask_expired
+    outputs:
+      - type: reply
+        text: No response received. Proceeding with default action.

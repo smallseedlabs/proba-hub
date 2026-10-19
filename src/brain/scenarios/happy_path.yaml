@@ -1,0 +1,73 @@
+name: happy_path
+description: Happy path conversation flow with clarification, plan, approval, and decision
+
+steps:
+  - trigger:
+      type: create_goal
+    outputs:
+      - type: clarify
+        reason: Need clarification on target audience
+        questions:
+          - id: audience
+            text: Who should see these ads?
+            type: choice
+            options:
+              - value: all
+                label: All existing users
+              - value: active
+                label: Active users (logged in last 30 days)
+              - value: power
+                label: Power users only
+
+  - trigger:
+      type: answer_ask
+      askType: clarify
+    outputs:
+      - type: plan
+        title: Campaign Launch Plan
+        description: 3-step campaign for active users
+        steps:
+          - id: step1
+            title: Create ad creative
+            description: Design 3 ad variants highlighting the new feature
+            estimatedCost: 30
+          - id: step2
+            title: Configure targeting
+            description: Set up audience segment for active users
+            estimatedCost: 20
+          - id: step3
+            title: Launch campaign
+            description: Deploy campaign with daily budget
+            estimatedCost: 3000
+        totalCost: 3050
+
+  - trigger:
+      type: approve_plan
+      approved: true
+    outputs:
+      - type: tool_call
+        tool: adjust_budget
+        parameters:
+          dailyBudget: 120
+        needsApproval: true
+        risk: medium
+        costImpact:
+          current: 100
+          proposed: 120
+
+  - trigger:
+      type: answer_ask
+      askType: action_approval
+    outputs:
+      - type: reply
+        text: Launching campaign with adjusted budget
+      - type: decision
+        decision: keep
+        target: Campaign
+        evidence:
+          - Campaign performance is meeting KPIs
+          - Cost per conversion within target
+          - Click-through rate above industry average
+          - Budget utilization is optimal
+        confidence: 0.87
+        recommendation: Continue campaign with current settings. Consider slight creative refresh in 2 weeks.
