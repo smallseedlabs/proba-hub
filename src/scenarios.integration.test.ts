@@ -1,11 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { fastify as app } from './server.js';
 import { pool } from './db/client.js';
-import { readFile } from 'fs/promises';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe('Mock Brain Scenarios Integration Tests', () => {
   let token: string;
@@ -13,11 +8,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   let threadId: string;
 
   beforeAll(async () => {
-    const migrationSql = await readFile(
-      join(__dirname, 'db/migrations/001_initial_schema.sql'),
-      'utf-8'
-    );
-    await pool.query(migrationSql);
+    // Clean up existing data
+    await pool.query('TRUNCATE TABLE commands, events, asks, ask_questions, ask_answers, messages, goals, inbox_items, threads, sessions, users, outbox, event_sequences CASCADE');
 
     const response = await app.inject({
       method: 'POST',
@@ -40,8 +32,6 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   }, 60000);
 
   afterAll(async () => {
-    await pool.query('DROP SCHEMA public CASCADE');
-    await pool.query('CREATE SCHEMA public');
     await app.close();
   });
 
