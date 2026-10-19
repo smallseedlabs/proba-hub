@@ -100,7 +100,7 @@ export class MockBrain extends BaseBrainPort {
     if (command.type === 'answer_ask') {
       const payload = command.payload as Record<string, unknown>;
       logger.info({ askId: payload.askId, askType: payload.askType, choice: payload.choice }, 'Processing answer_ask');
-      if (payload.choice !== 'approve' && payload.askType === 'clarify') {
+      if (payload.askType === 'clarify') {
         state.clarificationRound++;
         logger.debug({ threadId, clarificationRound: state.clarificationRound }, 'Incremented clarification round');
       }
@@ -109,7 +109,16 @@ export class MockBrain extends BaseBrainPort {
     for (let i = state.stepIndex; i < this.scenario.steps.length; i++) {
       const step = this.scenario.steps[i];
       
-      if (this.matchesTrigger(step.trigger, command, state)) {
+      const matches = this.matchesTrigger(step.trigger, command, state);
+      logger.debug({
+        stepIndex: i,
+        trigger: step.trigger,
+        commandType: command.type,
+        commandPayload: command.payload,
+        matches
+      }, 'Checking trigger match');
+      
+      if (matches) {
         state.stepIndex = i + 1;
         
         const outputs = step.outputs.map(output => {

@@ -44,78 +44,84 @@ export class CommandProcessor {
         return this.processControl(client, userId, command, envelope);
       }
 
-      const context = await this.buildContext(client, userId, envelope.threadId);
-      
-      let brainOutputs: BrainOutput[];
-      try {
-        brainOutputs = await this.brain.process(envelope, context);
-      } catch (error) {
-        logger.error({ error, userId, command: envelope.type }, 'Brain processing failed');
-        
-        const errorEvent = await this.createErrorEvent(
-          client,
-          userId,
-          envelope.threadId,
-          'brain_error',
-          'Failed to process command. Please try again.'
-        );
-        
-        await this.addToOutbox(client, userId, errorEvent.id);
-        return { command, events: [errorEvent] };
-      }
-
       const events: Event[] = [];
       
-      for (const output of brainOutputs) {
-        // Validate brain output against protocol schema BEFORE any DB writes
-        if (!isBrainOutput(output)) {
-          logger.error({ output }, 'Invalid brain output - does not match protocol schema');
-          
-          try {
-            const seq = await this.getNextSeq(client, userId);
-            const errorEvent = await client.query<Event>(
-              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-               VALUES ($1, $2, 'error', $3, $4, NOW())
-               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
-                         payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: 'Invalid brain output format' })]
-            );
-            const errorEventRow = errorEvent.rows[0];
-            events.push(errorEventRow);
-            await this.addToOutbox(client, userId, errorEventRow.id);
-          } catch (innerError) {
-            logger.error({ error: innerError }, 'Failed to create error event for invalid output');
-          }
-          continue;
-        }
-
+      // Commands with special handlers (answer_ask, approve_plan) skip initial brain invocation
+      // and invoke it themselves after doing their specific work
+      if (envelope.type === 'answer_ask' || envelope.type === 'approve_plan') {
+        // These handlers will invoke brain and populate events
+      } else {
+        const context = await this.buildContext(client, userId, envelope.threadId);
+        
+        let brainOutputs: BrainOutput[];
         try {
-          const event = await this.processBrainOutput(
+          brainOutputs = await this.brain.process(envelope, context);
+        } catch (error) {
+          logger.error({ error, userId, command: envelope.type }, 'Brain processing failed');
+          
+          const errorEvent = await this.createErrorEvent(
             client,
             userId,
             envelope.threadId,
-            output
+            'brain_error',
+            'Failed to process command. Please try again.'
           );
-          events.push(event);
-          await this.addToOutbox(client, userId, event.id);
-        } catch (error) {
-          logger.error({ error, output }, 'Failed to process brain output');
           
-          // Surface error as error event
+          await this.addToOutbox(client, userId, errorEvent.id);
+          return { command, events: [errorEvent] };
+        }
+        
+        for (const output of brainOutputs) {
+          // Validate brain output against protocol schema BEFORE any DB writes
+          if (!isBrainOutput(output)) {
+            logger.error({ output }, 'Invalid brain output - does not match protocol schema');
+            
+            try {
+              const seq = await this.getNextSeq(client, userId);
+              const errorEvent = await client.query<Event>(
+                `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+                 VALUES ($1, $2, 'error', $3, $4, NOW())
+                 RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                           payload, created_at as "createdAt"`,
+                [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: 'Invalid brain output format' })]
+              );
+              const errorEventRow = errorEvent.rows[0];
+              events.push(errorEventRow);
+              await this.addToOutbox(client, userId, errorEventRow.id);
+            } catch (innerError) {
+              logger.error({ error: innerError }, 'Failed to create error event for invalid output');
+            }
+            continue;
+          }
+
           try {
-            const seq = await this.getNextSeq(client, userId);
-            const errorEvent = await client.query<Event>(
-              `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
-               VALUES ($1, $2, 'error', $3, $4, NOW())
-               RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
-                         payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: (error as Error).message })]
+            const event = await this.processBrainOutput(
+              client,
+              userId,
+              envelope.threadId,
+              output
             );
-            const errorEventRow = errorEvent.rows[0];
-            events.push(errorEventRow);
-            await this.addToOutbox(client, userId, errorEventRow.id);
-          } catch (innerError) {
-            logger.error({ error: innerError }, 'Failed to create error event');
+            events.push(event);
+            await this.addToOutbox(client, userId, event.id);
+          } catch (error) {
+            logger.error({ error, output }, 'Failed to process brain output');
+            
+            // Surface error as error event
+            try {
+              const seq = await this.getNextSeq(client, userId);
+              const errorEvent = await client.query<Event>(
+                `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+                 VALUES ($1, $2, 'error', $3, $4, NOW())
+                 RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                           payload, created_at as "createdAt"`,
+                [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: (error as Error).message })]
+              );
+              const errorEventRow = errorEvent.rows[0];
+              events.push(errorEventRow);
+              await this.addToOutbox(client, userId, errorEventRow.id);
+            } catch (innerError) {
+              logger.error({ error: innerError }, 'Failed to create error event');
+            }
           }
         }
       }
