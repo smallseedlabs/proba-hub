@@ -7,8 +7,16 @@ import { logger } from '../logger.js';
 import { pool } from '../db/client.js';
 import type { CommandResult } from '../types.js';
 
-const brain = new MockBrain(config.brain.scenario);
-const processor = new CommandProcessor(brain);
+// Lazy-load brain to allow tests to change scenario via env var
+let processor: CommandProcessor | null = null;
+
+function getProcessor(): CommandProcessor {
+  if (!processor) {
+    const brain = new MockBrain(config.brain.scenario);
+    processor = new CommandProcessor(brain);
+  }
+  return processor;
+}
 
 export async function commandRoutes(fastify: FastifyInstance) {
   fastify.post<{ Body: unknown; Reply: CommandResult }>(
@@ -54,7 +62,7 @@ export async function commandRoutes(fastify: FastifyInstance) {
 
       setImmediate(async () => {
         try {
-          await processor.processCommand(request.user!.id, envelope);
+          await getProcessor().processCommand(request.user!.id, envelope);
         } catch (error) {
           logger.error(
             { error, userId: request.user!.id, clientMsgId: envelope.clientMsgId },
