@@ -12,6 +12,7 @@ import type {
   AnswerAskPayload,
 } from '@smallseedlabs/proba-protocol';
 import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
+import { toJsonb } from '../db/jsonb.js';
 
 export class CommandProcessor {
   constructor(private brain: BrainPort) {}
@@ -77,7 +78,7 @@ export class CommandProcessor {
                VALUES ($1, $2, 'error', $3, $4, NOW())
                RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                          payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: 'Invalid brain output format' })]
             );
             const errorEventRow = errorEvent.rows[0];
             events.push(errorEventRow);
@@ -108,7 +109,7 @@ export class CommandProcessor {
                VALUES ($1, $2, 'error', $3, $4, NOW())
                RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                          payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, { code: 'brain_error', message: (error as Error).message }]
+              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: (error as Error).message })]
             );
             const errorEventRow = errorEvent.rows[0];
             events.push(errorEventRow);
@@ -139,7 +140,7 @@ export class CommandProcessor {
                VALUES ($1, $2, 'error', $3, $4, NOW())
                RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                          payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: 'Invalid brain output format' })]
             );
             events.push(errorEvent.rows[0]);
             await this.addToOutbox(client, userId, errorEvent.rows[0].id);
@@ -170,7 +171,7 @@ export class CommandProcessor {
                VALUES ($1, $2, 'error', $3, $4, NOW())
                RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                          payload, created_at as "createdAt"`,
-              [userId, seq, envelope.threadId, { code: 'brain_error', message: 'Invalid brain output format' }]
+              [userId, seq, envelope.threadId, toJsonb({ code: 'brain_error', message: 'Invalid brain output format' })]
             );
             events.push(errorEvent.rows[0]);
             await this.addToOutbox(client, userId, errorEvent.rows[0].id);
@@ -300,29 +301,18 @@ export class CommandProcessor {
     
     let uiPayloadId: string | undefined;
     if ('ui' in eventEnvelope && eventEnvelope.ui) {
-      const propsValue = typeof eventEnvelope.ui.props === 'string' 
-        ? eventEnvelope.ui.props 
-        : JSON.stringify(eventEnvelope.ui.props);
-      const actionsValue = 'actions' in eventEnvelope.ui && eventEnvelope.ui.actions
-        ? (typeof eventEnvelope.ui.actions === 'string' ? eventEnvelope.ui.actions : JSON.stringify(eventEnvelope.ui.actions))
-        : null;
-        
       const uiResult = await client.query<{ id: string }>(
         'INSERT INTO ui_payloads (component, version, props, actions) VALUES ($1, $2, $3, $4) RETURNING id',
         [
           eventEnvelope.ui.component,
           eventEnvelope.ui.version,
-          propsValue,
-          actionsValue,
+          toJsonb(eventEnvelope.ui.props),
+          toJsonb('actions' in eventEnvelope.ui ? eventEnvelope.ui.actions : null),
         ]
       );
       uiPayloadId = uiResult.rows[0].id;
     }
 
-    const payloadValue = typeof eventEnvelope.payload === 'string'
-      ? eventEnvelope.payload
-      : JSON.stringify(eventEnvelope.payload);
-      
     const eventResult = await client.query<Event>(
       `INSERT INTO events (user_id, seq, type, thread_id, payload, ui_payload_id, fallback_text)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -334,7 +324,7 @@ export class CommandProcessor {
         seq,
         eventEnvelope.type,
         threadId,
-        payloadValue,
+        toJsonb(eventEnvelope.payload),
         uiPayloadId,
         'fallbackText' in eventEnvelope ? eventEnvelope.fallbackText : null,
       ]
@@ -368,13 +358,6 @@ export class CommandProcessor {
     threadId: string,
     payload: Record<string, unknown>
   ): Promise<void> {
-    const questionsValue = typeof payload.questions === 'string' 
-      ? payload.questions 
-      : JSON.stringify(payload.questions);
-    const costEffectValue = payload.costEffect 
-      ? (typeof payload.costEffect === 'string' ? payload.costEffect : JSON.stringify(payload.costEffect))
-      : null;
-    
     await client.query(
       `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -386,20 +369,13 @@ export class CommandProcessor {
         payload.description,
         payload.blocking,
         payload.risk,
-        costEffectValue,
-        questionsValue,
+        toJsonb(payload.costEffect),
+        toJsonb(payload.questions),
       ]
     );
 
     const questions = payload.questions as Array<Record<string, unknown>>;
     for (const question of questions) {
-      const optionsValue = question.options 
-        ? (typeof question.options === 'string' ? question.options : JSON.stringify(question.options))
-        : null;
-      const constraintsValue = question.constraints
-        ? (typeof question.constraints === 'string' ? question.constraints : JSON.stringify(question.constraints))
-        : null;
-        
       await client.query(
         `INSERT INTO ask_questions (ask_id, question_id, type, label, required, options, constraints)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -409,8 +385,8 @@ export class CommandProcessor {
           question.type,
           question.label,
           question.required ?? true,
-          optionsValue,
-          constraintsValue,
+          toJsonb(question.options),
+          toJsonb(question.constraints),
         ]
       );
     }
@@ -429,10 +405,9 @@ export class CommandProcessor {
     threadId: string,
     payload: AnswerAskPayload
   ): Promise<Event> {
-    const answerValue = typeof payload === 'string' ? payload : JSON.stringify(payload);
     await client.query(
       `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1 WHERE id = $2`,
-      [answerValue, payload.askId]
+      [toJsonb(payload), payload.askId]
     );
 
     await client.query(
@@ -448,7 +423,7 @@ export class CommandProcessor {
        VALUES ($1, $2, 'ask_resolved', $3, $4, NOW())
        RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                  payload, created_at as "createdAt"`,
-      [userId, seq, threadId, JSON.stringify({ askId: payload.askId, resolution: 'answered' })]
+      [userId, seq, threadId, toJsonb({ askId: payload.askId, resolution: 'answered' })]
     );
     
     const event = eventResult.rows[0];
@@ -470,8 +445,8 @@ export class CommandProcessor {
         threadId,
         payload.title,
         payload.description,
-        payload.constraints ? (typeof payload.constraints === 'string' ? payload.constraints : JSON.stringify(payload.constraints)) : null,
-        typeof payload.budget === 'string' ? payload.budget : JSON.stringify(payload.budget),
+        toJsonb(payload.constraints),
+        toJsonb(payload.budget),
       ]
     );
   }
@@ -496,7 +471,7 @@ export class CommandProcessor {
         userId,
         seq,
         envelope.threadId,
-        JSON.stringify({
+        toJsonb({
           state: payload.action,
           message: `Execution ${payload.action}`,
         }),
@@ -529,7 +504,7 @@ export class CommandProcessor {
        RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                  payload, ui_payload_id as "uiPayloadId", fallback_text as "fallbackText",
                  created_at as "createdAt"`,
-      [userId, seq, threadId, JSON.stringify({ code, message })]
+      [userId, seq, threadId, toJsonb({ code, message })]
     );
 
     return result.rows[0];
