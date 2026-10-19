@@ -108,8 +108,8 @@ describe('API Integration Tests', () => {
 
       expect(response1.statusCode).toBe(202);
 
-      // Wait for async processing
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Wait for async processing (setImmediate) + database write
+      await new Promise(resolve => setTimeout(resolve, 2500));
 
       // Second request with same clientMsgId should be idempotent
       const response2 = await app.inject({
@@ -181,8 +181,8 @@ describe('API Integration Tests', () => {
 
       await Promise.all(commandPromises);
 
-      // Wait for all commands to process through outbox relay
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      // Wait for all commands to process (setImmediate batch + database + outbox)
+      await new Promise(resolve => setTimeout(resolve, 4000));
 
       // Check that sequences are gap-free
       const events = await pool.query(

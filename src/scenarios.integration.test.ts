@@ -77,8 +77,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
   }
 
   async function waitForProcessing() {
-    // Wait for command processing + outbox relay + Redis pub/sub
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Wait for command processing (setImmediate) + database write + outbox relay (1s poll)
+    await new Promise(resolve => setTimeout(resolve, 2500));
   }
 
   describe('happy_path scenario', () => {
