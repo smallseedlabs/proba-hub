@@ -76,8 +76,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Run unit tests
-        run: npm run test
+      - name: Run unit tests (fails on any skipped/todo test)
+        run: npm run test:ci
 
   integration-test:
     name: Integration Tests
@@ -111,6 +111,7 @@ jobs:
       DATABASE_URL: postgresql://proba:proba@localhost:5432/proba_hub_test
       REDIS_URL: redis://localhost:6379
       NODE_ENV: test
+      LOG_LEVEL: warn
     
     steps:
       - uses: actions/checkout@v4
@@ -130,8 +131,19 @@ jobs:
       - name: Run migrations
         run: npm run migrate
       
-      - name: Run integration tests
-        run: npm run test:integration
+      # Runs every *.integration.test.ts (scenarios, answer flow, jsonb, API incl.
+      # concurrency, SSE over a real HTTP server). The report check fails the job
+      # if anything is skipped/todo or if the SSE/concurrency suites did not run.
+      - name: Run integration tests (SSE + concurrency required, 0 skipped)
+        run: npm run test:integration:ci
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-report
+          path: test-reports/
+          if-no-files-found: ignore
 
   docker:
     name: Docker Build
