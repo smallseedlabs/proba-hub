@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeApp } from './app.js';
 import { pool } from './db/client.js';
+import { randomUUID } from 'crypto';
 
 const app = await initializeApp({ startBackgroundJobs: true });
 
@@ -90,7 +91,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Step 1: Create goal
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'hp-1',
+        clientMsgId: randomUUID(),
         type: 'create_goal',
         threadId,
         payload: {
@@ -114,7 +115,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Step 2: Answer clarification
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'hp-2',
+        clientMsgId: randomUUID(),
         type: 'answer_ask',
         threadId,
         payload: {
@@ -137,7 +138,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Step 3: Approve plan
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'hp-3',
+        clientMsgId: randomUUID(),
         type: 'approve_plan',
         threadId,
         payload: {
@@ -158,7 +159,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Step 4: Answer action approval
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'hp-4',
+        clientMsgId: randomUUID(),
         type: 'answer_ask',
         threadId,
         payload: {
@@ -192,7 +193,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Create goal triggers plan
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ae-1',
+        clientMsgId: randomUUID(),
         type: 'create_goal',
         threadId,
         payload: {
@@ -212,7 +213,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Approve plan
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ae-2',
+        clientMsgId: randomUUID(),
         type: 'approve_plan',
         threadId,
         payload: {
@@ -232,7 +233,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Edit the approval
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ae-3',
+        clientMsgId: randomUUID(),
         type: 'answer_ask',
         threadId,
         payload: {
@@ -262,7 +263,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // First clarify
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'cl-1',
+        clientMsgId: randomUUID(),
         type: 'create_goal',
         threadId,
         payload: {
@@ -283,7 +284,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Answer first clarify
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'cl-2',
+        clientMsgId: randomUUID(),
         type: 'answer_ask',
         threadId,
         payload: {
@@ -304,7 +305,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       // Answer second clarify - should end loop
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'cl-3',
+        clientMsgId: randomUUID(),
         type: 'answer_ask',
         threadId,
         payload: {
@@ -339,7 +340,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     it('should handle pause control bypassing brain', async () => {
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ctrl-1',
+        clientMsgId: randomUUID(),
         type: 'control',
         threadId,
         payload: {
@@ -359,7 +360,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     it('should handle resume control', async () => {
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ctrl-2',
+        clientMsgId: randomUUID(),
         type: 'control',
         threadId,
         payload: {
@@ -379,7 +380,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     it('should handle kill control', async () => {
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'ctrl-3',
+        clientMsgId: randomUUID(),
         type: 'control',
         threadId,
         payload: {
@@ -405,7 +406,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     it('should handle malformed brain output gracefully', async () => {
       await sendCommand({
         kind: 'command',
-        clientMsgId: 'mal-1',
+        clientMsgId: randomUUID(),
         type: 'create_goal',
         threadId,
         payload: {
