@@ -396,6 +396,16 @@ The mock brain uses YAML scenario files in `src/brain/scenarios/`:
 Set via `MOCK_BRAIN_SCENARIO` environment variable, or inject it in code/tests:
 `buildApp({ brainScenario: 'approval_edit' })`.
 
+The default applies to every new conversation. A single goal (or first
+message) can pick another scenario by including `#<scenario>` in its title or
+description, e.g. `Launch spring sale #approval_edit`.
+
+Scenario steps may carry an optional mock-only `goal:` block (status,
+progress, campaign metrics). After the step runs the Hub persists it on the
+goal and emits a `goal_updated` event with a `goal_summary` UI, which is what
+proba-web's Goals and Campaigns screens render. Creating a goal always emits
+an initial `goal_updated`.
+
 ## Deployment
 
 ### Docker Swarm

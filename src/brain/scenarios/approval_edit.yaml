@@ -4,6 +4,18 @@ description: User edits approval from +20% to +10%
 steps:
   - trigger:
       type: create_goal
+    goal:
+      status: active
+      progress:
+        completed: 0
+        total: 3
+        milestones:
+          - name: Plan approved
+            completed: false
+          - name: Budget agreed
+            completed: false
+          - name: Campaign live
+            completed: false
     outputs:
       - type: plan
         title: Simple Campaign Plan
@@ -18,6 +30,18 @@ steps:
   - trigger:
       type: approve_plan
       approved: true
+    goal:
+      status: active
+      progress:
+        completed: 1
+        total: 3
+        milestones:
+          - name: Plan approved
+            completed: true
+          - name: Budget agreed
+            completed: false
+          - name: Campaign live
+            completed: false
     outputs:
       - type: tool_call
         tool: adjust_budget
@@ -33,6 +57,23 @@ steps:
       type: answer_ask
       askType: action_approval
       choice: edit
+    goal:
+      status: active
+      progress:
+        completed: 3
+        total: 3
+        milestones:
+          - name: Plan approved
+            completed: true
+          - name: Budget agreed
+            completed: true
+          - name: Campaign live
+            completed: true
+      metrics:
+        spend: 41.2
+        impressions: 6120
+        clicks: 188
+        conversions: 9
     outputs:
       - type: reply
         text: Understood. I'll use your adjusted budget of $110/day (+10%)

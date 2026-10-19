@@ -1,10 +1,11 @@
 import { readFile } from 'fs/promises';
+import { readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import { BaseBrainPort } from './port.js';
 import { logger } from '../logger.js';
-import type { BrainContext } from '../types.js';
+import type { BrainContext, BrainGoalUpdate } from '../types.js';
 import type { CommandEnvelope, BrainOutput } from '@smallseedlabs/proba-protocol';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,8 @@ interface ScenarioTrigger {
 interface ScenarioStep {
   trigger: ScenarioTrigger;
   outputs: BrainOutput[];
+  /** Optional goal progress/metrics reported when this step runs (mock only). */
+  goal?: BrainGoalUpdate;
 }
 
 interface Scenario {
@@ -31,10 +34,16 @@ interface Scenario {
 interface ThreadState {
   stepIndex: number;
   clarificationRound: number;
+  scenarioName: string;
+  pendingGoalUpdate?: BrainGoalUpdate;
 }
 
+/** `#scenario_name` in a goal title/description or first message picks the scenario for that thread. */
+const SCENARIO_TAG = /#([a-z][a-z0-9_]{1,63})\b/gi;
+const SCENARIO_NAME = /^[a-z][a-z0-9_]{1,63}$/;
+
 export class MockBrain extends BaseBrainPort {
-  private scenario: Scenario | null = null;
+  private scenarios: Map<string, Scenario> = new Map();
   private scenarioName: string;
   private threadStates: Map<string, ThreadState> = new Map();
 
@@ -43,43 +52,69 @@ export class MockBrain extends BaseBrainPort {
     this.scenarioName = scenarioName;
   }
 
-  private getThreadState(threadId: string): ThreadState {
+  private getThreadState(threadId: string, command: CommandEnvelope): ThreadState {
     let state = this.threadStates.get(threadId);
     if (!state) {
-      state = { stepIndex: 0, clarificationRound: 0 };
+      state = { stepIndex: 0, clarificationRound: 0, scenarioName: this.pickScenario(command) };
       this.threadStates.set(threadId, state);
-      logger.debug({ threadId, scenario: this.scenarioName }, 'Created new thread state');
+      logger.debug({ threadId, scenario: state.scenarioName }, 'Created new thread state');
     }
     return state;
   }
 
-  async loadScenario(): Promise<void> {
-    if (this.scenario) return;
-    
+  /** Default scenario, unless the conversation opens with a `#scenario_name` tag for a known scenario. */
+  private pickScenario(command: CommandEnvelope): string {
+    const payload = (command.payload ?? {}) as Record<string, unknown>;
+    const text = [payload.title, payload.description, payload.text].filter((v) => typeof v === 'string').join(' ');
+    for (const match of text.matchAll(SCENARIO_TAG)) {
+      const name = match[1].toLowerCase();
+      if (MockBrain.availableScenarios().includes(name)) return name;
+    }
+    return this.scenarioName;
+  }
+
+  /** Scenario names shipped in src/brain/scenarios. */
+  static availableScenarios(): string[] {
+    return readdirSync(join(__dirname, 'scenarios'))
+      .filter((f) => f.endsWith('.yaml'))
+      .map((f) => f.replace(/\.yaml$/, ''))
+      .sort();
+  }
+
+  takeGoalUpdate(threadId: string): BrainGoalUpdate | undefined {
+    const state = this.threadStates.get(threadId);
+    const update = state?.pendingGoalUpdate;
+    if (state) state.pendingGoalUpdate = undefined;
+    return update;
+  }
+
+  async loadScenario(name: string = this.scenarioName): Promise<Scenario> {
+    const cached = this.scenarios.get(name);
+    if (cached) return cached;
+    if (!SCENARIO_NAME.test(name)) throw new Error(`Invalid scenario name: ${name}`);
+
     try {
-      const scenarioPath = join(__dirname, 'scenarios', `${this.scenarioName}.yaml`);
+      const scenarioPath = join(__dirname, 'scenarios', `${name}.yaml`);
       const content = await readFile(scenarioPath, 'utf-8');
-      this.scenario = yaml.load(content) as Scenario;
-      logger.info({ scenario: this.scenarioName }, 'Loaded brain scenario');
+      const scenario = yaml.load(content) as Scenario;
+      this.scenarios.set(name, scenario);
+      logger.info({ scenario: name }, 'Loaded brain scenario');
+      return scenario;
     } catch (error) {
-      logger.error({ error, scenario: this.scenarioName }, 'Failed to load scenario');
+      logger.error({ error, scenario: name }, 'Failed to load scenario');
       throw error;
     }
   }
 
   async process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[]> {
-    await this.loadScenario();
-    
-    if (!this.scenario) {
-      throw new Error('Scenario not loaded');
-    }
-
     const threadId = context.threadId || 'default';
-    const state = this.getThreadState(threadId);
+    const state = this.getThreadState(threadId, command);
+    const scenario = await this.loadScenario(state.scenarioName);
+    state.pendingGoalUpdate = undefined;
 
     logger.info(
       { 
-        scenario: this.scenarioName,
+        scenario: state.scenarioName,
         threadId,
         commandType: command.type,
         stepIndex: state.stepIndex,
@@ -106,8 +141,8 @@ export class MockBrain extends BaseBrainPort {
       }
     }
 
-    for (let i = state.stepIndex; i < this.scenario.steps.length; i++) {
-      const step = this.scenario.steps[i];
+    for (let i = state.stepIndex; i < scenario.steps.length; i++) {
+      const step = scenario.steps[i];
       
       const matches = this.matchesTrigger(step.trigger, command, state);
       logger.debug({
@@ -120,6 +155,7 @@ export class MockBrain extends BaseBrainPort {
       
       if (matches) {
         state.stepIndex = i + 1;
+        state.pendingGoalUpdate = step.goal;
         
         const outputs = step.outputs.map(output => {
           if (output.type === 'clarify' && 'expiresIn' in output) {
@@ -131,7 +167,7 @@ export class MockBrain extends BaseBrainPort {
         
         logger.info(
           { 
-            scenario: this.scenarioName, 
+            scenario: state.scenarioName,
             step: i, 
             trigger: step.trigger,
             outputCount: outputs.length,
