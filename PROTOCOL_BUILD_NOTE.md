@@ -11,14 +11,8 @@ proba-protocol PR #3 added a `prepare` script (`npm run build`), so npm builds t
 package when installing it from a git URL. It is merged to `main` at
 `c643d52f2515977251b4dec6e058b94cfb002e45` (package version 0.1.2).
 
-proba-hub depends on that exact commit:
+proba-hub depends on the published v0.1.2 release tag, which points at that commit:
 
 ```json
-"@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#c643d52f2515977251b4dec6e058b94cfb002e45"
+"@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.1.2"
 ```
-
-## TODO
-
-Switch to `github:smallseedlabs/proba-protocol#v0.1.2` (and refresh
-`package-lock.json`) once v0.1.2 is tagged/released. The same TODO lives in the
-`"//"` field of `package.json`.
