@@ -13,6 +13,14 @@ describe('SSE Integration Tests', () => {
     // Clean up existing data
     await pool.query('TRUNCATE TABLE commands, events, asks, ask_questions, ask_answers, messages, goals, inbox_items, threads, sessions, users, outbox, event_sequences CASCADE');
 
+    // Create user directly in database to avoid any app-layer complexity
+    const userResult = await pool.query(
+      'INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id',
+      ['sse-test@example.com', 'SSE Test User']
+    );
+    userId = userResult.rows[0].id;
+
+    // Use the auth endpoint to get a token for this user
     const response = await app.inject({
       method: 'POST',
       url: '/dev/login',
@@ -27,12 +35,7 @@ describe('SSE Integration Tests', () => {
     }
 
     const data = JSON.parse(response.body);
-    if (!data.user || !data.user.id) {
-      throw new Error(`Login response missing user data: ${response.body}`);
-    }
-    
     token = data.token;
-    userId = data.user.id;
 
     const threadResult = await pool.query(
       'INSERT INTO threads (user_id, status) VALUES ($1, $2) RETURNING id',
