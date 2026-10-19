@@ -1,0 +1,9 @@
+name: malformed_output
+description: Simulates malformed brain output that should be rejected safely
+
+steps:
+  - trigger:
+      type: create_goal
+    outputs:
+      - type: invalid_type
+        data: This should fail validation
