@@ -21,7 +21,15 @@ describe('API Integration Tests', () => {
       },
     });
 
+    if (response.statusCode !== 200) {
+      throw new Error(`Login failed with status ${response.statusCode}: ${response.body}`);
+    }
+
     const data = JSON.parse(response.body);
+    if (!data.user || !data.user.id) {
+      throw new Error(`Login response missing user data: ${response.body}`);
+    }
+    
     token = data.token;
     userId = data.user.id;
 
