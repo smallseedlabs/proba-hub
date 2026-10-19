@@ -3,7 +3,7 @@ import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
 import { kickOutboxRelay } from './outbox-relay.js';
 import { isBrainOutput } from '@smallseedlabs/proba-protocol';
-import type { BrainPort, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
+import type { BrainPort, BrainGoalUpdate, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
 import type { 
   CommandEnvelope, 
   BrainOutput,
@@ -13,6 +13,19 @@ import type {
 } from '@smallseedlabs/proba-protocol';
 import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
 import { toJsonb } from '../db/jsonb.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type GoalStatus = 'active' | 'paused' | 'completed' | 'cancelled';
+
+interface GoalRow {
+  id: string;
+  title: string;
+  status: string;
+  progress: BrainGoalUpdate['progress'] | null;
+  metrics: BrainGoalUpdate['metrics'] | null;
+  budget: { daily?: number; total?: number; currency?: string } | null;
+}
 
 export class CommandProcessor {
   constructor(private brain: BrainPort) {}
@@ -143,12 +156,15 @@ export class CommandProcessor {
       const answerPayload = envelope.payload as AnswerAskPayload;
       const askType = (envelope.payload as unknown as Record<string, unknown>).askType;
       logger.info({ askId: answerPayload.askId, askType }, 'Handling answer_ask command');
+      // Clients answer with { askId, choice, values }; the brain also needs the
+      // ask type (clarify / plan_approval / action_approval). Look it up.
+      const brainEnvelope = await this.withAskType(client, envelope);
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
       
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const brainOutputs = await this.brain.process(envelope, context);
+      const brainOutputs = await this.brain.process(brainEnvelope, context);
       
       for (const output of brainOutputs) {
         if (!isBrainOutput(output)) {
@@ -175,6 +191,11 @@ export class CommandProcessor {
     if (envelope.type === 'approve_plan') {
       const planPayload = envelope.payload as Record<string, unknown>;
       logger.info({ planId: planPayload.planId }, 'Handling approve_plan command');
+
+      // The plan was presented as a plan_approval ask: resolve it so every
+      // client (and a reload) sees it as decided.
+      const planResolved = await this.resolvePlanAsk(client, userId, envelope.threadId, planPayload);
+      if (planResolved) events.push(planResolved);
       
       // After approving plan, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
@@ -203,8 +224,15 @@ export class CommandProcessor {
       }
     }
 
+    const threadKey = envelope.threadId || 'default';
+    const goalUpdate = this.brain.takeGoalUpdate?.(threadKey);
+
     if (envelope.type === 'create_goal') {
-      await this.createGoal(client, userId, envelope.threadId!, envelope.payload as CreateGoalPayload);
+      const goal = await this.createGoal(client, userId, envelope.threadId!, envelope.payload as CreateGoalPayload);
+      events.push(await this.emitGoalUpdated(client, userId, envelope.threadId!, goal, goalUpdate ?? {}));
+    } else if (goalUpdate && envelope.threadId) {
+      const goal = await this.latestGoal(client, envelope.threadId);
+      if (goal) events.push(await this.emitGoalUpdated(client, userId, envelope.threadId, goal, goalUpdate));
     }
 
     await client.query(
@@ -422,8 +450,8 @@ export class CommandProcessor {
     payload: AnswerAskPayload
   ): Promise<Event> {
     await client.query(
-      `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1 WHERE id = $2`,
-      [toJsonb(payload), payload.askId]
+      `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1 WHERE id = $2 AND thread_id = $3`,
+      [toJsonb(payload), payload.askId, threadId]
     );
 
     await client.query(
@@ -439,7 +467,16 @@ export class CommandProcessor {
        VALUES ($1, $2, 'ask_resolved', $3, $4, NOW())
        RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                  payload, created_at as "createdAt"`,
-      [userId, seq, threadId, toJsonb({ askId: payload.askId, resolution: 'answered' })]
+      [
+        userId,
+        seq,
+        threadId,
+        toJsonb({
+          askId: payload.askId,
+          resolution: 'answered',
+          answer: { choice: payload.choice, ...(payload.values ? { values: payload.values } : {}) },
+        }),
+      ]
     );
     
     const event = eventResult.rows[0];
@@ -452,10 +489,11 @@ export class CommandProcessor {
     userId: string,
     threadId: string,
     payload: CreateGoalPayload
-  ): Promise<void> {
-    await client.query(
+  ): Promise<GoalRow> {
+    const result = await client.query<GoalRow>(
       `INSERT INTO goals (user_id, thread_id, title, description, constraints, budget, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'draft')`,
+       VALUES ($1, $2, $3, $4, $5, $6, 'active')
+       RETURNING id, title, status, progress, metrics, budget`,
       [
         userId,
         threadId,
@@ -465,6 +503,137 @@ export class CommandProcessor {
         toJsonb(payload.budget),
       ]
     );
+    return result.rows[0];
+  }
+
+  private async latestGoal(client: PoolClient, threadId: string): Promise<GoalRow | null> {
+    const result = await client.query<GoalRow>(
+      `SELECT id, title, status, progress, metrics, budget FROM goals
+       WHERE thread_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [threadId]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /** Persist a goal update and emit goal_updated (with a goal_summary UI) for clients. */
+  private async emitGoalUpdated(
+    client: PoolClient,
+    userId: string,
+    threadId: string,
+    goal: GoalRow,
+    update: BrainGoalUpdate
+  ): Promise<Event> {
+    const knownStatuses: GoalStatus[] = ['active', 'paused', 'completed', 'cancelled'];
+    const status: GoalStatus =
+      update.status ?? (knownStatuses.includes(goal.status as GoalStatus) ? (goal.status as GoalStatus) : 'active');
+    const progress = update.progress ?? goal.progress ?? undefined;
+    const mergedMetrics = update.metrics || goal.metrics ? { ...(goal.metrics ?? {}), ...(update.metrics ?? {}) } : undefined;
+    const metrics = mergedMetrics
+      ? {
+          spend: mergedMetrics.spend ?? 0,
+          impressions: mergedMetrics.impressions ?? 0,
+          clicks: mergedMetrics.clicks ?? 0,
+          conversions: mergedMetrics.conversions ?? 0,
+        }
+      : undefined;
+
+    await client.query('UPDATE goals SET status = $1, progress = $2, metrics = $3 WHERE id = $4', [
+      status,
+      toJsonb(progress ?? null),
+      toJsonb(metrics ?? null),
+      goal.id,
+    ]);
+
+    const percent = progress && progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+    const ui = await client.query<{ id: string }>(
+      'INSERT INTO ui_payloads (component, version, props, actions) VALUES ($1, $2, $3, $4) RETURNING id',
+      [
+        'goal_summary',
+        '1.0.0',
+        toJsonb({
+          title: goal.title,
+          status,
+          progress: percent,
+          metrics: {
+            spend: metrics?.spend ?? 0,
+            budget: goal.budget?.daily ?? 0,
+            currency: goal.budget?.currency ?? 'USD',
+            ...(metrics
+              ? { impressions: metrics.impressions, clicks: metrics.clicks, conversions: metrics.conversions }
+              : {}),
+          },
+        }),
+        toJsonb(null),
+      ]
+    );
+
+    const seq = await this.getNextSeq(client, userId);
+    const payload = {
+      goalId: goal.id,
+      status,
+      ...(progress ? { progress } : {}),
+      ...(metrics ? { metrics } : {}),
+    };
+    const eventResult = await client.query<Event>(
+      `INSERT INTO events (user_id, seq, type, thread_id, payload, ui_payload_id, fallback_text)
+       VALUES ($1, $2, 'goal_updated', $3, $4, $5, $6)
+       RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                 payload, ui_payload_id as "uiPayloadId", fallback_text as "fallbackText",
+                 created_at as "createdAt"`,
+      [userId, seq, threadId, toJsonb(payload), ui.rows[0].id, `${goal.title} (${status}, ${percent}%)`]
+    );
+    const event = eventResult.rows[0];
+    await this.addToOutbox(client, userId, event.id);
+    return event;
+  }
+
+  /** answer_ask payloads from clients omit askType; add it from the stored ask. */
+  private async withAskType(client: PoolClient, envelope: CommandEnvelope): Promise<CommandEnvelope> {
+    const payload = envelope.payload as unknown as Record<string, unknown>;
+    if (typeof payload.askType === 'string' || typeof payload.askId !== 'string' || !UUID_RE.test(payload.askId)) {
+      return envelope;
+    }
+    const result = await client.query<{ askType: string }>(
+      'SELECT ask_type as "askType" FROM asks WHERE id = $1 AND thread_id = $2',
+      [payload.askId, envelope.threadId]
+    );
+    if (result.rows.length === 0) return envelope;
+    return { ...envelope, payload: { ...payload, askType: result.rows[0].askType } };
+  }
+
+  /** Mark the plan_approval ask behind an approve_plan command as answered. */
+  private async resolvePlanAsk(
+    client: PoolClient,
+    userId: string,
+    threadId: string | undefined,
+    payload: Record<string, unknown>
+  ): Promise<Event | null> {
+    const planId = payload.planId;
+    if (!threadId || typeof planId !== 'string' || !UUID_RE.test(planId)) return null;
+    const choice = payload.approved === false ? 'reject' : 'approve';
+    const updated = await client.query(
+      `UPDATE asks SET status = 'answered', answered_at = NOW(), answer = $1
+       WHERE id = $2 AND thread_id = $3 AND ask_type = 'plan_approval' AND status = 'pending'
+       RETURNING id`,
+      [toJsonb({ askId: planId, choice }), planId, threadId]
+    );
+    if (updated.rowCount === 0) return null;
+
+    await client.query(
+      `UPDATE inbox_items SET status = 'resolved', updated_at = NOW() WHERE related_ask_id = $1`,
+      [planId]
+    );
+    const seq = await this.getNextSeq(client, userId);
+    const eventResult = await client.query<Event>(
+      `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+       VALUES ($1, $2, 'ask_resolved', $3, $4, NOW())
+       RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                 payload, created_at as "createdAt"`,
+      [userId, seq, threadId, toJsonb({ askId: planId, resolution: 'answered', answer: { choice } })]
+    );
+    const event = eventResult.rows[0];
+    await this.addToOutbox(client, userId, event.id);
+    return event;
   }
 
   private async processControl(
