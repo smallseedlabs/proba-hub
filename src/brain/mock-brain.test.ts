@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { MockBrain } from './mock-brain.js';
 import type { CommandEnvelope } from '@smallseedlabs/proba-protocol';
+import type { PoolClient } from 'pg';
+
+const mockClient = {} as PoolClient;
 
 describe('MockBrain Direct Unit Tests', () => {
   describe('happy_path scenario', () => {
@@ -29,7 +32,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
@@ -57,7 +60,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
@@ -83,7 +86,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
@@ -110,7 +113,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 4 outputs:', step4Outputs.map(o => o.type));
@@ -146,7 +149,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
@@ -174,7 +177,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
@@ -202,7 +205,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
@@ -238,7 +241,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 1 outputs:', step1Outputs.map(o => o.type));
@@ -264,7 +267,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 2 outputs:', step2Outputs.map(o => o.type));
@@ -291,7 +294,7 @@ describe('MockBrain Direct Unit Tests', () => {
         goals: [],
         thread: { id: threadId, userId: 'user1', status: 'active', createdAt: new Date(), updatedAt: new Date() },
         messages: [],
-        metrics: {},
+        client: mockClient,
       });
 
       console.log('Step 3 outputs:', step3Outputs.map(o => o.type));
