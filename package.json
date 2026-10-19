@@ -13,6 +13,7 @@
     "start": "node dist/index.js",
     "migrate": "node --import tsx src/db/migrate.ts",
     "seed": "node --import tsx src/db/seed.ts",
+    "user:create": "node --import tsx src/cli/create-user.ts",
     "test": "NODE_ENV=test vitest run",
     "test:ci": "NODE_ENV=test vitest run --reporter=default --reporter=json --outputFile.json=test-reports/unit.json && node scripts/assert-test-report.mjs test-reports/unit.json",
     "test:watch": "NODE_ENV=test vitest",

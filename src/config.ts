@@ -26,10 +26,20 @@ export const config = {
   auth: {
     jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    /** Failed sign-in attempts allowed per email per window (per-IP limit is 3x). */
+    loginRateLimitMax: parseInt(process.env.AUTH_LOGIN_RATE_LIMIT_MAX || '10', 10),
+    loginRateLimitWindowMs: parseInt(process.env.AUTH_LOGIN_RATE_LIMIT_WINDOW_MS || '900000', 10),
+    /** POST /dev/login (password-less). Never registered when NODE_ENV=production. */
+    devLoginEnabled:
+      process.env.NODE_ENV !== 'production' && process.env.DEV_LOGIN_ENABLED !== 'false',
   },
   
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    /** Comma-separated list of allowed browser origins. */
+    origin: (process.env.CORS_ORIGIN || 'http://localhost:5173')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
   },
   
   sse: {

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { createServer } from './server.js';
 import { config } from './config.js';
-import { authRoutes } from './routes/auth.js';
+import { authRoutes, devAuthRoutes, type AuthRoutesOptions } from './routes/auth.js';
 import { commandRoutes } from './routes/commands.js';
 import { eventRoutes } from './routes/events.js';
 import { readRoutes } from './routes/reads.js';
@@ -20,6 +20,10 @@ export interface AppOptions {
   brain?: BrainPort;
   /** SSE heartbeat interval. Defaults to config.sse.heartbeatIntervalMs. */
   sseHeartbeatIntervalMs?: number;
+  /** Sign-in rate limit overrides (tests). */
+  authRateLimit?: AuthRoutesOptions;
+  /** Register POST /dev/login. Defaults to config.auth.devLoginEnabled (never in production). */
+  devLogin?: boolean;
 }
 
 /**
@@ -33,7 +37,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const brain = options.brain ?? new MockBrain(options.brainScenario ?? config.brain.scenario);
   const processor = new CommandProcessor(brain);
 
-  await fastify.register(authRoutes);
+  if (!config.isProduction && (options.devLogin ?? config.auth.devLoginEnabled)) {
+    await fastify.register(devAuthRoutes);
+  }
+  await fastify.register(authRoutes, { prefix: '/v1', ...options.authRateLimit });
   await fastify.register(commandRoutes, { prefix: '/v1', processor });
   await fastify.register(eventRoutes, {
     prefix: '/v1',
