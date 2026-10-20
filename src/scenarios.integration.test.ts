@@ -82,6 +82,10 @@ describe('Mock Brain Scenarios Integration Tests', () => {
     return response;
   }
 
+  function maxSeq(events: any[]): number {
+    return events.reduce((max, e) => Math.max(max, e.seq), 0);
+  }
+
   async function waitForNewEvents(minCount: number = 1, fromSeq: number = 0): Promise<any[]> {
     return waitForEvents(
       app,
@@ -114,7 +118,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       const askEvent = events.find((e: any) => e.type === 'ask');
       expect(askEvent, 'Should have ask event after create_goal').toBeDefined();
       expect(askEvent.payload.askType).toBe('clarify');
-      const step1Seq = askEvent.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step1Seq = maxSeq(events);
 
       // Step 2: Answer clarification - wait for plan ask
       await sendCommand({
@@ -136,7 +141,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         e.seq > step1Seq && e.type === 'ask' && e.payload.askType === 'plan_approval'
       );
       expect(planAsk, 'Should have plan_approval ask after answer_ask').toBeDefined();
-      const step2Seq = planAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step2Seq = maxSeq(events);
 
       // Step 3: Approve plan - wait for action ask
       await sendCommand({
@@ -157,7 +163,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         e.seq > step2Seq && e.type === 'ask' && e.payload.askType === 'action_approval'
       );
       expect(actionAsk, 'Should have action_approval ask after approve_plan').toBeDefined();
-      const step3Seq = actionAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step3Seq = maxSeq(events);
 
       // Step 4: Answer action approval - wait for decision message
       await sendCommand({
@@ -206,7 +213,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       let events = await waitForNewEvents(1);
       const planAsk = events.find((e: any) => e.type === 'ask');
       expect(planAsk, 'Should have ask after create_goal').toBeDefined();
-      const step1Seq = planAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step1Seq = maxSeq(events);
 
       // Approve plan - wait for action ask
       await sendCommand({
@@ -226,7 +234,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
         e.seq > step1Seq && e.type === 'ask' && e.payload.askType === 'action_approval'
       );
       expect(actionAsk, 'Should have action_approval ask').toBeDefined();
-      const step2Seq = actionAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step2Seq = maxSeq(events);
 
       // Edit the approval - wait for adjusted message
       await sendCommand({
@@ -273,7 +282,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       const firstAsk = events.find((e: any) => e.type === 'ask');
       expect(firstAsk, 'Should have first ask').toBeDefined();
       expect(firstAsk.payload.askType).toBe('clarify');
-      const step1Seq = firstAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step1Seq = maxSeq(events);
 
       // Answer first clarify - wait for second clarify
       await sendCommand({
@@ -294,7 +304,8 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       const secondAsk = events.filter((e: any) => e.seq > step1Seq && e.type === 'ask').pop();
       expect(secondAsk, 'Should have second ask').toBeDefined();
       expect(secondAsk.payload.askType).toBe('clarify');
-      const step2Seq = secondAsk.seq;
+      // All events of a command commit atomically; wait past everything seen so far.
+      const step2Seq = maxSeq(events);
 
       // Answer second clarify - should end loop
       await sendCommand({

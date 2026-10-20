@@ -113,8 +113,29 @@ export interface ProcessedCommand {
   events: Event[];
 }
 
+/** Goal progress/metrics a brain reports alongside its outputs (optional). */
+export interface BrainGoalUpdate {
+  status?: 'active' | 'paused' | 'completed' | 'cancelled';
+  progress?: {
+    completed: number;
+    total: number;
+    milestones?: Array<{ name: string; completed: boolean }>;
+  };
+  metrics?: {
+    spend?: number;
+    impressions?: number;
+    clicks?: number;
+    conversions?: number;
+  };
+}
+
 export interface BrainPort {
   process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[]>;
+  /**
+   * Goal update produced by the last process() call for this thread, if any.
+   * Returned once (consumed). Optional: brains that do not track goals omit it.
+   */
+  takeGoalUpdate?(threadId: string): BrainGoalUpdate | undefined;
 }
 
 export interface BrainContext {

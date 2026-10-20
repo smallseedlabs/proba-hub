@@ -4,6 +4,18 @@ description: Multiple clarification rounds, capped at 2
 steps:
   - trigger:
       type: create_goal
+    goal:
+      status: active
+      progress:
+        completed: 0
+        total: 3
+        milestones:
+          - name: Product described
+            completed: false
+          - name: Market described
+            completed: false
+          - name: Plan proposed
+            completed: false
     outputs:
       - type: clarify
         reason: Need more details about your product
@@ -16,6 +28,18 @@ steps:
       type: answer_ask
       askType: clarify
       round: 1
+    goal:
+      status: active
+      progress:
+        completed: 1
+        total: 3
+        milestones:
+          - name: Product described
+            completed: true
+          - name: Market described
+            completed: false
+          - name: Plan proposed
+            completed: false
     outputs:
       - type: clarify
         reason: Need to know your target market
@@ -28,6 +52,18 @@ steps:
       type: answer_ask
       askType: clarify
       round: 2
+    goal:
+      status: active
+      progress:
+        completed: 3
+        total: 3
+        milestones:
+          - name: Product described
+            completed: true
+          - name: Market described
+            completed: true
+          - name: Plan proposed
+            completed: true
     outputs:
       - type: reply
         text: Thank you for the clarifications. Creating your campaign plan now.

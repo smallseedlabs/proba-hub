@@ -1,9 +1,25 @@
 name: happy_path
 description: Happy path conversation flow with clarification, plan, approval, and decision
 
+# Optional `goal:` blocks are mock-only: the Hub turns them into goal_updated
+# events (progress + campaign metrics) after the step's outputs.
 steps:
   - trigger:
       type: create_goal
+    goal:
+      status: active
+      progress:
+        completed: 0
+        total: 4
+        milestones:
+          - name: Audience confirmed
+            completed: false
+          - name: Plan approved
+            completed: false
+          - name: Budget approved
+            completed: false
+          - name: Campaign live
+            completed: false
     outputs:
       - type: clarify
         reason: Need clarification on target audience
@@ -22,6 +38,20 @@ steps:
   - trigger:
       type: answer_ask
       askType: clarify
+    goal:
+      status: active
+      progress:
+        completed: 1
+        total: 4
+        milestones:
+          - name: Audience confirmed
+            completed: true
+          - name: Plan approved
+            completed: false
+          - name: Budget approved
+            completed: false
+          - name: Campaign live
+            completed: false
     outputs:
       - type: plan
         title: Campaign Launch Plan
@@ -44,6 +74,25 @@ steps:
   - trigger:
       type: approve_plan
       approved: true
+    goal:
+      status: active
+      progress:
+        completed: 2
+        total: 4
+        milestones:
+          - name: Audience confirmed
+            completed: true
+          - name: Plan approved
+            completed: true
+          - name: Budget approved
+            completed: false
+          - name: Campaign live
+            completed: false
+      metrics:
+        spend: 0
+        impressions: 0
+        clicks: 0
+        conversions: 0
     outputs:
       - type: tool_call
         tool: adjust_budget
@@ -58,6 +107,25 @@ steps:
   - trigger:
       type: answer_ask
       askType: action_approval
+    goal:
+      status: active
+      progress:
+        completed: 4
+        total: 4
+        milestones:
+          - name: Audience confirmed
+            completed: true
+          - name: Plan approved
+            completed: true
+          - name: Budget approved
+            completed: true
+          - name: Campaign live
+            completed: true
+      metrics:
+        spend: 84.5
+        impressions: 12840
+        clicks: 412
+        conversions: 23
     outputs:
       - type: reply
         text: Launching campaign with adjusted budget

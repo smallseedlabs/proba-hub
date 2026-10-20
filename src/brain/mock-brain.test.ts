@@ -294,3 +294,47 @@ describe('MockBrain Direct Unit Tests', () => {
     });
   });
 });
+
+describe('MockBrain scenario selection and goal updates', () => {
+  const ctx = (threadId: string) => ({
+    userId: 'user1',
+    threadId,
+    goals: [],
+    messages: [],
+    client: mockClient,
+  });
+  const createGoal = (threadId: string, title: string): CommandEnvelope => ({
+    kind: 'command',
+    clientMsgId: `c-${threadId}`,
+    type: 'create_goal',
+    threadId,
+    payload: { title },
+    sentAt: new Date().toISOString(),
+  });
+
+  it('lists the shipped scenarios', () => {
+    expect(MockBrain.availableScenarios()).toEqual(
+      expect.arrayContaining(['approval_edit', 'clarification_loop', 'happy_path'])
+    );
+  });
+
+  it('uses the default scenario unless the goal names one with #tag', async () => {
+    const brain = new MockBrain('happy_path');
+    const def = await brain.process(createGoal('t1', 'Launch shoes'), ctx('t1'));
+    expect(def[0]).toMatchObject({ type: 'clarify', reason: 'Need clarification on target audience' });
+
+    const tagged = await brain.process(createGoal('t2', 'Launch shoes #approval_edit'), ctx('t2'));
+    expect(tagged[0].type).toBe('plan');
+
+    const unknownTag = await brain.process(createGoal('t3', 'Launch #nope'), ctx('t3'));
+    expect(unknownTag[0].type).toBe('clarify');
+  });
+
+  it('reports the matched step goal update once', async () => {
+    const brain = new MockBrain('happy_path');
+    await brain.process(createGoal('t4', 'Goal'), ctx('t4'));
+    const update = brain.takeGoalUpdate('t4');
+    expect(update?.progress).toMatchObject({ completed: 0, total: 4 });
+    expect(brain.takeGoalUpdate('t4')).toBeUndefined();
+  });
+});

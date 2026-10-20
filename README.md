@@ -162,26 +162,65 @@ npm start
 
 ### Authentication
 
-**POST** `/dev/login`
+Email/password sign-in backed by the `users` and `sessions` tables. Passwords
+are hashed with scrypt (`node:crypto`, N=2^16, r=8, p=1, random salt); sessions
+store a SHA-256 of the token, so a database leak does not leak usable tokens.
 
-Dev-only login. Returns a JWT token.
+**POST** `/v1/auth/login`
+
+```bash
+curl -X POST http://localhost:3000/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "ana@example.com", "password": "..."}'
+```
+
+Response (the contract proba-web expects):
+```json
+{
+  "token": "eyJhbG...",
+  "user": { "id": "...", "email": "ana@example.com", "name": "Ana Example" },
+  "workspaces": [{ "id": "default", "name": "My workspace" }],
+  "expiresAt": "2026-10-27T00:00:00.000Z"
+}
+```
+
+- Wrong password, unknown email and password-less accounts all get the same
+  `401 {"error":"invalid_credentials","message":"Invalid email or password."}`
+  with the same scrypt work (no account enumeration by timing).
+- Repeated failures are rate-limited per email (`AUTH_LOGIN_RATE_LIMIT_MAX`,
+  default 10 per 15 min) and per IP (3x) with `429` + `Retry-After`.
+- Workspaces are not modelled yet; every user gets one `default` workspace.
+
+**POST** `/v1/auth/logout` (Bearer token) deletes the session: the token stops
+working immediately for `/v1/commands`, `/v1/events` and every read. Returns `204`.
+
+**GET** `/v1/auth/me` (Bearer token) returns `{ user, workspaces }`.
+
+#### Creating users
+
+There is no self-service sign-up. Create accounts with the CLI; it generates a
+strong random password and prints it **once**:
+
+```bash
+npm run user:create -- --email ana@example.com --name "Ana Example"
+# Write the password to a 0600 file instead of printing it:
+npm run user:create -- --email ana@example.com --name "Ana Example" --password-file ./ana.txt
+# Issue a new password (also signs the user out everywhere):
+npm run user:create -- --email ana@example.com --name "Ana Example" --reset-password
+```
+
+In the production image (no tsx): `node dist/cli/create-user.js --email ... --name ...`.
+
+**POST** `/dev/login` (development and tests only)
+
+Password-less login by email. It is never registered when `NODE_ENV=production`
+(and can be switched off elsewhere with `DEV_LOGIN_ENABLED=false`). proba-web
+does not use it.
 
 ```bash
 curl -X POST http://localhost:3000/dev/login \
   -H "Content-Type: application/json" \
   -d '{"email": "demo@proba.example", "name": "Demo User"}'
-```
-
-Response:
-```json
-{
-  "token": "eyJhbG...",
-  "user": {
-    "id": "...",
-    "email": "demo@proba.example",
-    "name": "Demo User"
-  }
-}
 ```
 
 Use this token in subsequent requests as `Authorization: Bearer <token>` or `?token=<token>` for SSE.
@@ -342,6 +381,7 @@ curl -X POST http://localhost:3000/v1/commands \
   that fails on any skipped/todo test and requires the SSE and concurrency suites
 - `npm run migrate` - Run database migrations
 - `npm run seed` - Seed demo data
+- `npm run user:create -- --email <email> --name <name>` - Create a sign-in user with a generated password
 
 ### Mock Brain Scenarios
 
@@ -355,6 +395,16 @@ The mock brain uses YAML scenario files in `src/brain/scenarios/`:
 
 Set via `MOCK_BRAIN_SCENARIO` environment variable, or inject it in code/tests:
 `buildApp({ brainScenario: 'approval_edit' })`.
+
+The default applies to every new conversation. A single goal (or first
+message) can pick another scenario by including `#<scenario>` in its title or
+description, e.g. `Launch spring sale #approval_edit`.
+
+Scenario steps may carry an optional mock-only `goal:` block (status,
+progress, campaign metrics). After the step runs the Hub persists it on the
+goal and emits a `goal_updated` event with a `goal_summary` UI, which is what
+proba-web's Goals and Campaigns screens render. Creating a goal always emits
+an initial `goal_updated`.
 
 ## Deployment
 

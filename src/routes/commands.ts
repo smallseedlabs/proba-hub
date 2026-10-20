@@ -36,7 +36,7 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
         });
       }
 
-      const envelope = validation.data as CommandEnvelope;
+      let envelope = validation.data as CommandEnvelope;
 
       // The envelope schema types `payload` as unknown; validate it against the
       // per-command-type schema before it reaches the processor/DB.
@@ -62,7 +62,19 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
             reason: 'thread_not_found',
           });
         }
-      } else if (envelope.type !== 'send_message' && envelope.type !== 'create_goal') {
+      } else if (envelope.type === 'send_message' || envelope.type === 'create_goal') {
+        // A new conversation: give it its own thread so the brain state, goal
+        // and messages have somewhere to live (threads.id is NOT NULL for them).
+        const title =
+          envelope.type === 'create_goal'
+            ? (envelope.payload as { title?: string }).title
+            : (envelope.payload as { text?: string }).text;
+        const created = await pool.query<{ id: string }>(
+          'INSERT INTO threads (user_id, status, title) VALUES ($1, $2, $3) RETURNING id',
+          [userId, 'active', title ? title.slice(0, 500) : null]
+        );
+        envelope = { ...envelope, threadId: created.rows[0].id };
+      } else {
         await pool.query(
           'INSERT INTO threads (user_id, status) VALUES ($1, $2) RETURNING id',
           [userId, 'active']

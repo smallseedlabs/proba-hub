@@ -12,6 +12,7 @@ import {
   createTestUser,
   postCommand,
   range,
+  waitForCommandStatus,
   waitForEvents,
 } from './test-helpers.js';
 
@@ -121,8 +122,9 @@ describe('API Integration Tests', () => {
 
       expect(response1.statusCode).toBe(202);
 
-      // Wait for at least one event
-      await waitForEvents(app, token, events => events.length > 0, { timeout: 5000 });
+      // Wait for this specific command row to be committed and processed.
+      // (Waiting for "any event" raced: earlier tests already produced events.)
+      await waitForCommandStatus(userId, clientMsgId, 'processed');
 
       // Second request with same clientMsgId should be idempotent
       const response2 = await app.inject({
@@ -135,6 +137,10 @@ describe('API Integration Tests', () => {
       });
 
       expect(response2.statusCode).toBe(202);
+      expect(JSON.parse(response2.body).status).toBe('accepted');
+
+      // The duplicate is processed asynchronously as a no-op; the row stays processed.
+      await waitForCommandStatus(userId, clientMsgId, 'processed');
 
       // Should only have one command record
       const commandCount = await pool.query(
@@ -223,12 +229,14 @@ describe('API Integration Tests', () => {
       }
 
       // happy_path: the first create_goal yields a clarify ask, every later one a
-      // reply message -> exactly one event per command.
-      const events = await waitForEvents(concurrencyApp, user.token, evs => evs.length >= N, { timeout: 10000 });
-      expect(events.map(e => e.seq)).toEqual(range(1, N));
-      expect(await seqsFor(user.userId)).toEqual(range(1, N));
+      // reply message, and each also emits goal_updated -> two events per command.
+      const total = 2 * N;
+      const events = await waitForEvents(concurrencyApp, user.token, evs => evs.length >= total, { timeout: 10000 });
+      expect(events.map(e => e.seq)).toEqual(range(1, total));
+      expect(await seqsFor(user.userId)).toEqual(range(1, total));
       expect(events.filter(e => e.type === 'ask')).toHaveLength(1);
       expect(events.filter(e => e.type === 'message')).toHaveLength(N - 1);
+      expect(events.filter(e => e.type === 'goal_updated')).toHaveLength(N);
 
       const commands = await pool.query(
         `SELECT status, COUNT(*)::int AS count FROM commands WHERE user_id = $1 GROUP BY status`,
@@ -237,7 +245,7 @@ describe('API Integration Tests', () => {
       expect(commands.rows).toEqual([{ status: 'processed', count: N }]);
 
       const sequence = await pool.query('SELECT next_seq FROM event_sequences WHERE user_id = $1', [user.userId]);
-      expect(sequence.rows[0].next_seq).toBe(N + 1);
+      expect(sequence.rows[0].next_seq).toBe(total + 1);
     });
 
     it(`stays gap-free for ${N} parallel commands of mixed types`, async () => {
@@ -254,10 +262,13 @@ describe('API Integration Tests', () => {
       );
       expect(responses.every(r => r.statusCode === 202 && r.body.status === 'accepted')).toBe(true);
 
-      const events = await waitForEvents(concurrencyApp, user.token, evs => evs.length >= N, { timeout: 10000 });
-      expect(events.map(e => e.seq)).toEqual(range(1, N));
+      // control -> 1 status event; create_goal -> brain output + goal_updated.
+      const total = N / 2 + 2 * (N / 2);
+      const events = await waitForEvents(concurrencyApp, user.token, evs => evs.length >= total, { timeout: 10000 });
+      expect(events.map(e => e.seq)).toEqual(range(1, total));
       expect(events.filter(e => e.type === 'status')).toHaveLength(N / 2);
-      expect(await seqsFor(user.userId)).toEqual(range(1, N));
+      expect(events.filter(e => e.type === 'goal_updated')).toHaveLength(N / 2);
+      expect(await seqsFor(user.userId)).toEqual(range(1, total));
     });
 
     it(`processes the same clientMsgId sent ${N} times in parallel exactly once`, async () => {
@@ -277,7 +288,7 @@ describe('API Integration Tests', () => {
         [user.userId, clientMsgId]
       );
       expect(commandRows.rows).toEqual([{ status: 'processed', count: 1 }]);
-      expect(await seqsFor(user.userId)).toEqual([1]);
+      expect(await seqsFor(user.userId)).toEqual([1, 2]); // clarify ask + goal_updated
       const goals = await pool.query('SELECT COUNT(*)::int AS count FROM goals WHERE user_id = $1', [user.userId]);
       expect(goals.rows[0].count).toBe(1);
 

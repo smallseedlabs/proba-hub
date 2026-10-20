@@ -13,7 +13,8 @@ interface Migration {
 }
 
 const migrations: Migration[] = [
-  { id: 1, name: 'initial_schema', file: '001_initial_schema.sql' }
+  { id: 1, name: 'initial_schema', file: '001_initial_schema.sql' },
+  { id: 2, name: 'password_auth', file: '002_password_auth.sql' },
 ];
 
 async function ensureMigrationsTable(): Promise<void> {
