@@ -26,14 +26,24 @@ export const config = {
   auth: {
     jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
-    /** Failed sign-in attempts allowed per email per window (per-IP limit is 3x). */
-    loginRateLimitMax: parseInt(process.env.AUTH_LOGIN_RATE_LIMIT_MAX || '10', 10),
-    loginRateLimitWindowMs: parseInt(process.env.AUTH_LOGIN_RATE_LIMIT_WINDOW_MS || '900000', 10),
+    /** Failed POST /v1/auth/session attempts allowed per IP per window. */
+    sessionRateLimitMax: parseInt(process.env.AUTH_SESSION_RATE_LIMIT_MAX || '30', 10),
+    sessionRateLimitWindowMs: parseInt(process.env.AUTH_SESSION_RATE_LIMIT_WINDOW_MS || '900000', 10),
+    /** Comma-separated email domains allowed to sign in (verified emails only). Empty = anyone. */
+    allowedEmailDomains: (process.env.AUTH_ALLOWED_EMAIL_DOMAINS || '')
+      .split(',')
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
     /** POST /dev/login (password-less). Never registered when NODE_ENV=production. */
     devLoginEnabled:
       process.env.NODE_ENV !== 'production' && process.env.DEV_LOGIN_ENABLED !== 'false',
   },
   
+  firebase: {
+    /** Firebase project whose ID tokens are accepted (iss/aud). Sign-in is off when unset. */
+    projectId: (process.env.FIREBASE_PROJECT_ID || '').trim(),
+  },
+
   cors: {
     /** Comma-separated list of allowed browser origins. */
     origin: (process.env.CORS_ORIGIN || 'http://localhost:5173')

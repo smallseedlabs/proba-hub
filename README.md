@@ -87,7 +87,8 @@ Key variables:
 
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
-- `JWT_SECRET`: Secret for dev authentication (change in production!)
+- `FIREBASE_PROJECT_ID`: Firebase project whose ID tokens are accepted for sign-in
+- `JWT_SECRET`: Signs Hub session tokens (change in production!)
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
 - `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
 
@@ -162,16 +163,27 @@ npm start
 
 ### Authentication
 
-Email/password sign-in backed by the `users` and `sessions` tables. Passwords
-are hashed with scrypt (`node:crypto`, N=2^16, r=8, p=1, random salt); sessions
-store a SHA-256 of the token, so a database leak does not leak usable tokens.
+Users sign in with **Firebase Authentication** (email/password or Google) in
+proba-web. The Hub never sees passwords. It verifies the Firebase ID token and
+exchanges it for its own revocable session token, which is then used for
+`/v1/commands`, `/v1/events` (header or `?token=` for SSE, redacted in logs) and
+every read.
 
-**POST** `/v1/auth/login`
+ID tokens are verified without a service account: RS256 signature against
+Google's public keys
+(`https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com`,
+fetched and cached by [`jose`](https://github.com/panva/jose)), then
+`iss = https://securetoken.google.com/<FIREBASE_PROJECT_ID>`,
+`aud = <FIREBASE_PROJECT_ID>`, `exp`/`iat` (5 s clock tolerance), `auth_time`
+in the past and a non-empty `sub`. Set `FIREBASE_PROJECT_ID`; without it the
+endpoint answers `503 auth_not_configured`.
+
+**POST** `/v1/auth/session`
 
 ```bash
-curl -X POST http://localhost:3000/v1/auth/login \
+curl -X POST http://localhost:3000/v1/auth/session \
   -H "Content-Type: application/json" \
-  -d '{"email": "ana@example.com", "password": "..."}'
+  -d '{"idToken": "<Firebase ID token from getIdToken()>"}'
 ```
 
 Response (the contract proba-web expects):
@@ -184,32 +196,36 @@ Response (the contract proba-web expects):
 }
 ```
 
-- Wrong password, unknown email and password-less accounts all get the same
-  `401 {"error":"invalid_credentials","message":"Invalid email or password."}`
-  with the same scrypt work (no account enumeration by timing).
-- Repeated failures are rate-limited per email (`AUTH_LOGIN_RATE_LIMIT_MAX`,
-  default 10 per 15 min) and per IP (3x) with `429` + `Retry-After`.
-- Workspaces are not modelled yet; every user gets one `default` workspace.
+Users are upserted by Firebase uid (`users.firebase_uid`), keeping email,
+display name (`users.name`) and `email_verified` current. An existing account
+without a Firebase uid is linked on first sign-in only if Firebase reports the
+email as verified.
 
-**POST** `/v1/auth/logout` (Bearer token) deletes the session: the token stops
-working immediately for `/v1/commands`, `/v1/events` and every read. Returns `204`.
+| Status | `error` | When |
+| --- | --- | --- |
+| 400 | `invalid_request` | No `idToken` (the body is never echoed) |
+| 401 | `token_expired` | ID token expired: get a fresh one and retry once |
+| 401 | `invalid_token` | Bad signature, wrong `aud`/`iss`, bad `auth_time`/`sub` |
+| 403 | `email_required` | The Firebase account has no email |
+| 403 | `email_not_verified` | Would link an existing account with an unverified email |
+| 403 | `not_allowed` | Outside `AUTH_ALLOWED_EMAIL_DOMAINS` (when set) |
+| 409 | `account_conflict` | Email already linked to another Firebase user |
+| 429 | `rate_limited` | Too many failed exchanges from this IP (`AUTH_SESSION_RATE_LIMIT_MAX`) |
+| 503 | `auth_not_configured` | `FIREBASE_PROJECT_ID` not set |
+
+Workspaces are not modelled yet; every user gets one `default` workspace.
+
+**POST** `/v1/auth/logout` (Bearer token) deletes the Hub session: the token
+stops working immediately for `/v1/commands`, `/v1/events` and every read.
+Returns `204`. proba-web also signs out of Firebase.
 
 **GET** `/v1/auth/me` (Bearer token) returns `{ user, workspaces }`.
 
-#### Creating users
-
-There is no self-service sign-up. Create accounts with the CLI; it generates a
-strong random password and prints it **once**:
-
-```bash
-npm run user:create -- --email ana@example.com --name "Ana Example"
-# Write the password to a 0600 file instead of printing it:
-npm run user:create -- --email ana@example.com --name "Ana Example" --password-file ./ana.txt
-# Issue a new password (also signs the user out everywhere):
-npm run user:create -- --email ana@example.com --name "Ana Example" --reset-password
-```
-
-In the production image (no tsx): `node dist/cli/create-user.js --email ... --name ...`.
+Accounts are managed in the Firebase console (Authentication > Users). To
+restrict who can sign in, set `AUTH_ALLOWED_EMAIL_DOMAINS`. Without the Admin
+SDK the Hub cannot see Firebase refresh-token revocation; to cut off a user,
+disable them in Firebase and delete their rows from `sessions`
+(`DELETE FROM sessions WHERE user_id = ...`).
 
 **POST** `/dev/login` (development and tests only)
 
@@ -381,7 +397,6 @@ curl -X POST http://localhost:3000/v1/commands \
   that fails on any skipped/todo test and requires the SSE and concurrency suites
 - `npm run migrate` - Run database migrations
 - `npm run seed` - Seed demo data
-- `npm run user:create -- --email <email> --name <name>` - Create a sign-in user with a generated password
 
 ### Mock Brain Scenarios
 

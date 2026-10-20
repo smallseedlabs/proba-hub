@@ -3,26 +3,26 @@ import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import type { User } from '../types.js';
-import { verifyAgainstDummy, verifyPassword } from '../auth/password.js';
+import { FirebaseTokenError, type FirebaseTokenVerifier } from '../auth/firebase.js';
+import { resolveFirebaseUser, UserResolutionError } from '../auth/firebase-users.js';
 import { FixedWindowRateLimiter } from '../auth/rate-limit.js';
 import { issueSession } from '../auth/sessions.js';
-import { normalizeEmail } from '../auth/tokens.js';
 
 export interface Workspace {
   id: string;
   name: string;
 }
 
-export interface LoginResponse {
+/** Response of POST /v1/auth/session (the contract proba-web expects). */
+export interface SessionResponse {
   token: string;
   user: { id: string; email: string; name: string };
   workspaces: Workspace[];
   expiresAt: string;
 }
 
-interface LoginRequest {
-  email: string;
-  password: string;
+interface SessionRequest {
+  idToken: string;
 }
 
 interface DevLoginRequest {
@@ -31,7 +31,14 @@ interface DevLoginRequest {
 }
 
 export interface AuthRoutesOptions {
-  /** Failed attempts allowed per email per window; per-IP limit is 3x. */
+  /**
+   * Verifies Firebase ID tokens. null when FIREBASE_PROJECT_ID is not set:
+   * POST /v1/auth/session then answers 503.
+   */
+  firebaseVerifier: FirebaseTokenVerifier | null;
+  /** Lower-case email domains allowed to sign in. Empty = any Firebase user. */
+  allowedEmailDomains?: readonly string[];
+  /** Failed session exchanges allowed per IP per window. */
   rateLimitMax?: number;
   rateLimitWindowMs?: number;
 }
@@ -41,8 +48,6 @@ export interface AuthRoutesOptions {
  * workspace, matching the fallback proba-web uses.
  */
 export const DEFAULT_WORKSPACES: Workspace[] = [{ id: 'default', name: 'My workspace' }];
-
-const INVALID_CREDENTIALS = { error: 'invalid_credentials', message: 'Invalid email or password.' } as const;
 
 function toPublicUser(user: Pick<User, 'id' | 'email' | 'name'>) {
   return { id: user.id, email: user.email, name: user.name };
@@ -55,74 +60,87 @@ function tooManyAttempts(reply: FastifyReply, retryAfter: number) {
     .send({ error: 'rate_limited', message: 'Too many sign-in attempts. Try again later.' });
 }
 
-/** Password sign-in: POST /v1/auth/login, POST /v1/auth/logout, GET /v1/auth/me. */
-export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptions) {
-  const max = opts.rateLimitMax ?? config.auth.loginRateLimitMax;
-  const windowMs = opts.rateLimitWindowMs ?? config.auth.loginRateLimitWindowMs;
-  const byEmail = new FixedWindowRateLimiter({ max, windowMs });
-  const byIp = new FixedWindowRateLimiter({ max: max * 3, windowMs });
+const RESOLUTION_STATUS: Record<UserResolutionError['code'], number> = {
+  email_required: 403,
+  email_not_verified: 403,
+  not_allowed: 403,
+  account_conflict: 409,
+};
 
-  fastify.post<{ Body: LoginRequest }>(
-    '/auth/login',
+/**
+ * Sign-in via Firebase Authentication:
+ *   POST /v1/auth/session  exchange a Firebase ID token for a Hub session token
+ *   POST /v1/auth/logout   revoke the Hub session
+ *   GET  /v1/auth/me
+ */
+export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptions) {
+  const max = opts.rateLimitMax ?? config.auth.sessionRateLimitMax;
+  const windowMs = opts.rateLimitWindowMs ?? config.auth.sessionRateLimitWindowMs;
+  const failuresByIp = new FixedWindowRateLimiter({ max, windowMs });
+  const verify = opts.firebaseVerifier;
+
+  fastify.post<{ Body: SessionRequest }>(
+    '/auth/session',
     {
       schema: {
         body: {
           type: 'object',
-          required: ['email', 'password'],
-          properties: {
-            email: { type: 'string', minLength: 3, maxLength: 255 },
-            password: { type: 'string', minLength: 1, maxLength: 1024 },
-          },
+          required: ['idToken'],
+          properties: { idToken: { type: 'string', minLength: 1, maxLength: 8192 } },
         },
       },
-      // Do not echo the body (password) in validation errors.
+      // Do not echo the body (ID token) in validation errors.
       attachValidation: true,
     },
     async (request, reply) => {
+      if (!verify) {
+        return reply
+          .code(503)
+          .send({ error: 'auth_not_configured', message: 'Sign-in is not configured on this server.' });
+      }
       if (request.validationError) {
-        return reply.code(400).send({ error: 'invalid_request', message: 'Email and password are required.' });
+        return reply.code(400).send({ error: 'invalid_request', message: 'An ID token is required.' });
       }
 
-      const email = normalizeEmail(request.body.email);
-      const emailKey = `email:${email}`;
       const ipKey = `ip:${request.ip}`;
-
-      const retryAfter = Math.max(byEmail.retryAfter(emailKey), byIp.retryAfter(ipKey));
+      const retryAfter = failuresByIp.retryAfter(ipKey);
       if (retryAfter > 0) {
-        logger.warn({ ip: request.ip }, 'Sign-in rate limited');
+        logger.warn({ ip: request.ip }, 'Session exchange rate limited');
         return tooManyAttempts(reply, retryAfter);
       }
-      byIp.hit(ipKey);
 
-      const result = await pool.query<User & { passwordHash: string | null }>(
-        `SELECT id, email, name, password_hash as "passwordHash"
-         FROM users WHERE LOWER(email) = $1
-         ORDER BY created_at ASC LIMIT 1`,
-        [email]
-      );
-      const user = result.rows[0];
+      try {
+        const identity = await verify(request.body.idToken);
+        const user = await resolveFirebaseUser(identity, { allowedEmailDomains: opts.allowedEmailDomains });
+        const session = await issueSession(fastify, user.id);
+        logger.info({ userId: user.id, provider: identity.signInProvider }, 'Sign-in succeeded');
 
-      const ok = user?.passwordHash
-        ? await verifyPassword(request.body.password, user.passwordHash)
-        : await verifyAgainstDummy(request.body.password);
-
-      if (!ok || !user) {
-        byEmail.hit(emailKey);
-        logger.info({ ip: request.ip }, 'Sign-in failed');
-        return reply.code(401).send(INVALID_CREDENTIALS);
+        const body: SessionResponse = {
+          token: session.token,
+          user: toPublicUser(user),
+          workspaces: DEFAULT_WORKSPACES,
+          expiresAt: session.expiresAt.toISOString(),
+        };
+        return reply.send(body);
+      } catch (error) {
+        if (error instanceof FirebaseTokenError) {
+          failuresByIp.hit(ipKey);
+          logger.info({ ip: request.ip, reason: error.message }, 'Sign-in rejected');
+          return reply.code(401).send({
+            error: error.code,
+            message:
+              error.code === 'token_expired'
+                ? 'Your sign-in has expired. Sign in again.'
+                : 'Sign-in could not be verified. Sign in again.',
+          });
+        }
+        if (error instanceof UserResolutionError) {
+          failuresByIp.hit(ipKey);
+          logger.info({ ip: request.ip, reason: error.code }, 'Sign-in refused');
+          return reply.code(RESOLUTION_STATUS[error.code]).send({ error: error.code, message: error.message });
+        }
+        throw error;
       }
-
-      byEmail.reset(emailKey);
-      const session = await issueSession(fastify, user.id);
-      logger.info({ userId: user.id }, 'Sign-in succeeded');
-
-      const body: LoginResponse = {
-        token: session.token,
-        user: toPublicUser(user),
-        workspaces: DEFAULT_WORKSPACES,
-        expiresAt: session.expiresAt.toISOString(),
-      };
-      return reply.send(body);
     }
   );
 

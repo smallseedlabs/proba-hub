@@ -46,6 +46,7 @@ services:
       DATABASE_URL: postgresql://proba:proba@postgres:5432/proba_hub
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MOCK_BRAIN_SCENARIO: ${MOCK_BRAIN_SCENARIO:-happy_path}
