@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Sign-in with Firebase Authentication: `POST /v1/auth/session` verifies a
+  Firebase ID token against Google's public keys (no service account) and
+  exchanges it for a revocable Hub session token. Configure `FIREBASE_PROJECT_ID`.
+- Users are upserted by Firebase uid (migration `003_firebase_auth`: `firebase_uid`,
+  `email_verified`, `last_sign_in_at`); optional `AUTH_ALLOWED_EMAIL_DOMAINS`.
+
+### Removed
+
+- Hub-managed passwords: `POST /v1/auth/login`, `npm run user:create` and
+  `users.password_hash` (dropped by migration 003, which also signs out
+  password sessions). `AUTH_LOGIN_RATE_LIMIT_*` is replaced by
+  `AUTH_SESSION_RATE_LIMIT_*`.
+
 ### Changed
 
 - Pinned `@smallseedlabs/proba-protocol` to the `v0.1.2` release tag (same commit `c643d52`).

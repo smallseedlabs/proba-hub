@@ -3,16 +3,22 @@ import { randomUUID } from 'crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from './app.js';
 import { pool } from './db/client.js';
-import { createUserWithPassword } from './auth/users.js';
+import { createFakeFirebaseIssuer } from './auth/firebase-testing.js';
+import { createFirebaseTokenVerifier } from './auth/firebase.js';
 import { waitForEvents } from './test-helpers.js';
 
 /**
- * The flow exactly as proba-web drives it: password sign-in, create_goal
- * without a threadId, answer_ask without askType, approve_plan via the plan
- * card action, then the action approval. Goals/campaigns are fed by
+ * The flow exactly as proba-web drives it: Firebase sign-in exchanged for a
+ * Hub session, create_goal without a threadId, answer_ask without askType,
+ * approve_plan via the plan card action, then the action approval. Goals/campaigns are fed by
  * goal_updated events.
  */
-const app: FastifyInstance = await buildApp({ startBackgroundJobs: true, brainScenario: 'happy_path' });
+const firebase = await createFakeFirebaseIssuer('proba-web-flow');
+const app: FastifyInstance = await buildApp({
+  startBackgroundJobs: true,
+  brainScenario: 'happy_path',
+  firebaseVerifier: createFirebaseTokenVerifier({ projectId: firebase.projectId, keys: firebase.keys }),
+});
 
 function command(type: string, payload: Record<string, unknown>, threadId?: string) {
   return {
@@ -29,9 +35,8 @@ describe('Web client flow (happy_path)', () => {
   let token: string;
 
   beforeAll(async () => {
-    const email = `web-${randomUUID()}@example.com`;
-    const { password } = await createUserWithPassword({ email, name: 'Web Flow' });
-    const res = await app.inject({ method: 'POST', url: '/v1/auth/login', payload: { email, password } });
+    const idToken = await firebase.mint({ email: `web-${randomUUID()}@example.com`, name: 'Web Flow' });
+    const res = await app.inject({ method: 'POST', url: '/v1/auth/session', payload: { idToken } });
     expect(res.statusCode).toBe(200);
     token = JSON.parse(res.body).token;
   });
