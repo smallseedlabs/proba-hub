@@ -8,7 +8,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
-COPY scripts/copy-sql.mjs ./scripts/copy-sql.mjs
+COPY scripts/copy-assets.mjs ./scripts/copy-assets.mjs
 
 RUN npm run build
 
@@ -25,7 +25,6 @@ RUN npm ci --only=production && \
     npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
-COPY --chown=proba:proba src/brain/scenarios ./dist/brain/scenarios
 
 USER proba
 
