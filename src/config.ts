@@ -1,6 +1,9 @@
 import { config as loadEnv } from 'dotenv';
 import { resolveJwtSecret } from './auth/jwt-secret.js';
 
+/** Id of the workspace every user belongs to until the Hub models workspaces. */
+export const DEFAULT_WORKSPACE_ID = 'seedbed';
+
 loadEnv();
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -94,7 +97,7 @@ export const config = {
     /** Redis stream the audit-consumer reads. Same default as proba-audit (EVENT_BUS_AUDIT_TOPIC). */
     stream: process.env.AUDIT_STREAM || 'proba.audit.events',
     /** Workspace stamped on events when none is known (the Hub does not model workspaces yet). */
-    workspaceId: process.env.AUDIT_WORKSPACE_ID || 'seedbed',
+    workspaceId: process.env.AUDIT_WORKSPACE_ID || DEFAULT_WORKSPACE_ID,
     /** `service` field of emitted events. */
     service: 'hub',
     relayPollIntervalMs: envInt('AUDIT_RELAY_POLL_MS', 500),

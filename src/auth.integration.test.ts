@@ -58,7 +58,7 @@ describe('POST /v1/auth/session', () => {
     expect(typeof body.token).toBe('string');
     expect(body.token).not.toBe(idToken);
     expect(body.user).toEqual({ id: expect.any(String), email: address, name: 'Ana Example' });
-    expect(body.workspaces).toEqual([{ id: 'default', name: 'My workspace' }]);
+    expect(body.workspaces).toEqual([{ id: 'seedbed', name: 'Seedbed' }]);
     expect(new Date(body.expiresAt).getTime()).toBeGreaterThan(Date.now());
 
     const row = await pool.query(

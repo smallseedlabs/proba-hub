@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { pool, transaction } from '../db/client.js';
-import { config } from '../config.js';
+import { config, DEFAULT_WORKSPACE_ID } from '../config.js';
 import { logger } from '../logger.js';
 import type { User } from '../types.js';
 import { FirebaseTokenError, type FirebaseTokenVerifier } from '../auth/firebase.js';
@@ -80,10 +80,13 @@ export interface AuthRoutesOptions {
 }
 
 /**
- * The Hub does not model workspaces yet. Every user gets one default
- * workspace, matching the fallback proba-web uses.
+ * The Hub does not model workspaces yet (there is no workspace table or column,
+ * so nothing to migrate). Every user gets one default workspace, matching the
+ * fallback proba-web uses and the default `workspaceId` of audit events
+ * (AUDIT_WORKSPACE_ID). It was `default` / "My workspace" before it became Seedbed.
  */
-export const DEFAULT_WORKSPACES: Workspace[] = [{ id: 'default', name: 'My workspace' }];
+export const DEFAULT_WORKSPACE: Workspace = { id: DEFAULT_WORKSPACE_ID, name: 'Seedbed' };
+export const DEFAULT_WORKSPACES: Workspace[] = [DEFAULT_WORKSPACE];
 
 function toPublicUser(user: Pick<User, 'id' | 'email' | 'name'>) {
   return { id: user.id, email: user.email, name: user.name };

@@ -194,7 +194,7 @@ Response (the contract proba-web expects):
 {
   "token": "eyJhbG...",
   "user": { "id": "...", "email": "ana@example.com", "name": "Ana Example" },
-  "workspaces": [{ "id": "default", "name": "My workspace" }],
+  "workspaces": [{ "id": "seedbed", "name": "Seedbed" }],
   "expiresAt": "2026-10-27T00:00:00.000Z"
 }
 ```
@@ -216,7 +216,7 @@ email as verified.
 | 429 | `rate_limited` | Too many failed exchanges from this IP (`AUTH_SESSION_RATE_LIMIT_MAX`) |
 | 503 | `auth_not_configured` | `FIREBASE_PROJECT_ID` not set |
 
-Workspaces are not modelled yet; every user gets one `default` workspace.
+Workspaces are not modelled yet; every user gets one `seedbed` workspace ("Seedbed"; it was `default` / "My workspace" before). There is no workspace table or column, so no data migration is needed.
 
 **POST** `/v1/auth/logout` (Bearer token) deletes the Hub session: the token
 stops working immediately for `/v1/commands`, `/v1/events` and every read.
