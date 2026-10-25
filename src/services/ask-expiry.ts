@@ -50,7 +50,7 @@ export function stopAskExpiryJob(): void {
   }
 }
 
-async function processExpiredAsks(): Promise<void> {
+export async function processExpiredAsks(): Promise<void> {
   const result = await pool.query(
     `SELECT id, thread_id, on_expire, status
      FROM asks

@@ -18,7 +18,7 @@
     "test:ci": "NODE_ENV=test vitest run --reporter=default --reporter=json --outputFile.json=test-reports/unit.json && node scripts/assert-test-report.mjs test-reports/unit.json",
     "test:watch": "NODE_ENV=test vitest",
     "test:integration": "NODE_ENV=test vitest run --config vitest.integration.config.ts",
-    "test:integration:ci": "NODE_ENV=test vitest run --config vitest.integration.config.ts --reporter=default --reporter=json --outputFile.json=test-reports/integration.json && node scripts/assert-test-report.mjs test-reports/integration.json \"src/sse.integration.test.ts:replay via Last-Event-ID\" \"src/sse.integration.test.ts:heartbeat\" \"src/sse.integration.test.ts:listener cleanup\" \"src/api.integration.test.ts:Event Sequence Integrity (concurrency)\"",
+    "test:integration:ci": "NODE_ENV=test vitest run --config vitest.integration.config.ts --reporter=default --reporter=json --outputFile.json=test-reports/integration.json && node scripts/assert-test-report.mjs test-reports/integration.json \"src/sse.integration.test.ts:replay via Last-Event-ID\" \"src/sse.integration.test.ts:heartbeat\" \"src/sse.integration.test.ts:listener cleanup\" \"src/api.integration.test.ts:Event Sequence Integrity (concurrency)\" \"src/audit.integration.test.ts:written in the action\" \"src/audit.integration.test.ts:one traceId per /v1/commands request\" \"src/audit.integration.test.ts:audit relay publishes\" \"src/db/migrate.integration.test.ts:applies 004 on top\"",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "validate:scenarios": "tsx scripts/validate-scenarios.ts",
