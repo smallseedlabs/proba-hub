@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Pinned `@smallseedlabs/proba-protocol` to the `v0.1.2` release tag (same commit `c643d52`).
+- Pinned `@smallseedlabs/proba-protocol` to the `v0.2.0` release tag (`5444c34`; was `v0.1.2`). Additive: adds the `/audit` subpath.
 
 ### Fixed
 

@@ -480,4 +480,4 @@ Apache License 2.0 © Small Seed Labs
 
 **Note**: This is a PUBLIC repository. Never commit secrets. Use `.env` for local development and secrets management for production.
 
-**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.1.2` release tag.
+**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.2.0` release tag.
