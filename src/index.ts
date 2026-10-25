@@ -3,6 +3,8 @@ import { logger } from './logger.js';
 import { shutdown as shutdownDb } from './db/client.js';
 import { shutdown as shutdownRedis } from './services/redis.js';
 import { buildApp } from './app.js';
+import { getAudit } from './audit/service.js';
+import { runAsJob } from './audit/trace.js';
 
 const fastify = await buildApp({ startBackgroundJobs: true });
 
@@ -13,6 +15,19 @@ signals.forEach((signal) => {
     logger.info({ signal }, 'Received shutdown signal');
     
     try {
+      // Before closing, so the relay can still publish it.
+      await runAsJob(() =>
+        getAudit().emit(
+          {
+            action: 'system.stopped',
+            outcome: 'success',
+            root: true,
+            actor: { type: 'service', id: 'hub' },
+            details: { signal },
+          },
+          { bestEffort: true }
+        )
+      );
       await fastify.close();
       await shutdownDb();
       await shutdownRedis();
@@ -38,6 +53,23 @@ try {
       env: config.env,
     },
     'Server started'
+  );
+  await runAsJob(() =>
+    getAudit().emit(
+      {
+        action: 'system.started',
+        outcome: 'success',
+        root: true,
+        actor: { type: 'service', id: 'hub' },
+        details: {
+          env: config.env,
+          auditRelayEnabled: config.audit.relayEnabled,
+          auditStream: config.audit.stream,
+          brainScenario: config.brain.scenario,
+        },
+      },
+      { bestEffort: true }
+    )
   );
 } catch (err) {
   logger.error({ err }, 'Failed to start server');

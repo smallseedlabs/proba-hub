@@ -8,6 +8,7 @@ import { commandRoutes } from './routes/commands.js';
 import { eventRoutes } from './routes/events.js';
 import { readRoutes } from './routes/reads.js';
 import { startOutboxRelay, stopOutboxRelay } from './services/outbox-relay.js';
+import { startAuditRelay, stopAuditRelay } from './audit/relay.js';
 import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
 import { MockBrain } from './brain/mock-brain.js';
@@ -73,9 +74,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
 
   if (options.startBackgroundJobs !== false) {
     await startOutboxRelay();
+    // Audit relay: audit_outbox -> Redis Stream (AUDIT_ENABLED / AUDIT_RELAY_ENABLED).
+    // Independent of the SSE relay above and of the proba:events pub/sub channel.
+    startAuditRelay();
     startAskExpiryJob();
     fastify.addHook('onClose', async () => {
       await stopOutboxRelay();
+      await stopAuditRelay();
       stopAskExpiryJob();
     });
   }
