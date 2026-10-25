@@ -20,6 +20,7 @@ export const migrations: Migration[] = [
   { id: 1, name: 'initial_schema', file: '001_initial_schema.sql' },
   { id: 2, name: 'password_auth', file: '002_password_auth.sql' },
   { id: 3, name: 'firebase_auth', file: '003_firebase_auth.sql' },
+  { id: 4, name: 'audit_outbox', file: '004_audit_outbox.sql' },
 ];
 
 async function ensureMigrationsTable(): Promise<void> {

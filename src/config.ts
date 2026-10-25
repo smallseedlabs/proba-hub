@@ -3,6 +3,17 @@ import { resolveJwtSecret } from './auth/jwt-secret.js';
 
 loadEnv();
 
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return fallback;
+  return !['false', '0', 'no', 'off'].includes(raw);
+}
+
+function envInt(name: string, fallback: number): number {
+  const parsed = parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export const config = {
   env: process.env.NODE_ENV || 'development',
   isDevelopment: process.env.NODE_ENV !== 'production',
@@ -70,6 +81,32 @@ export const config = {
     scenario: process.env.MOCK_BRAIN_SCENARIO || 'happy_path',
   },
   
+  /** Audit trail (protocol AuditEvent) through the transactional outbox. */
+  audit: {
+    /** Master switch: when false no audit event is written to audit_outbox. */
+    enabled: envBool('AUDIT_ENABLED', true),
+    /**
+     * Run the relay that moves audit_outbox rows to the Redis stream. Disable on
+     * replicas that should only write (the outbox keeps the events until a relay runs).
+     * Default: on, except under NODE_ENV=test so test suites control the relay.
+     */
+    relayEnabled: envBool('AUDIT_RELAY_ENABLED', process.env.NODE_ENV !== 'test'),
+    /** Redis stream the audit-consumer reads. Same default as proba-audit (EVENT_BUS_AUDIT_TOPIC). */
+    stream: process.env.AUDIT_STREAM || 'proba.audit.events',
+    /** Workspace stamped on events when none is known (the Hub does not model workspaces yet). */
+    workspaceId: process.env.AUDIT_WORKSPACE_ID || 'seedbed',
+    /** `service` field of emitted events. */
+    service: 'hub',
+    relayPollIntervalMs: envInt('AUDIT_RELAY_POLL_MS', 500),
+    relayBatchSize: envInt('AUDIT_RELAY_BATCH_SIZE', 100),
+    /** Lease on claimed rows; also the retry delay after a failed publish. */
+    relayLeaseMs: envInt('AUDIT_RELAY_LEASE_MS', 30000),
+    /** Published rows older than this are pruned from audit_outbox. 0 keeps them. */
+    retainPublishedMs: envInt('AUDIT_OUTBOX_RETAIN_MS', 24 * 60 * 60 * 1000),
+    /** Approximate XADD MAXLEN for the stream. 0 = unbounded. */
+    maxStreamLength: envInt('AUDIT_STREAM_MAXLEN', 0),
+  },
+
   log: {
     level: process.env.LOG_LEVEL || 'info',
   },
