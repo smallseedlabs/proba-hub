@@ -128,8 +128,10 @@ jobs:
       - name: Build
         run: npm run build
       
-      - name: Run migrations
-        run: npm run migrate
+      # Uses the compiled entry point (what the production image runs), so a
+      # missing .sql file in dist/ fails CI.
+      - name: Run migrations (compiled entry point)
+        run: npm run migrate:prod
       
       # Runs every *.integration.test.ts (scenarios, answer flow, jsonb, API incl.
       # concurrency, SSE over a real HTTP server). The report check fails the job

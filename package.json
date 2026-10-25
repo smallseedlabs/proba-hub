@@ -8,10 +8,11 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-sql.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "migrate": "node --import tsx src/db/migrate.ts",
+    "migrate": "node --import tsx src/db/migrate-cli.ts",
+    "migrate:prod": "node dist/db/migrate-cli.js",
     "seed": "node --import tsx src/db/seed.ts",
     "test": "NODE_ENV=test vitest run",
     "test:ci": "NODE_ENV=test vitest run --reporter=default --reporter=json --outputFile.json=test-reports/unit.json && node scripts/assert-test-report.mjs test-reports/unit.json",

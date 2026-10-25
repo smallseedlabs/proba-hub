@@ -29,16 +29,39 @@ services:
       timeout: 3s
       retries: 5
 
+  # One-shot: applies pending SQL migrations with the compiled entry point (no tsx),
+  # then exits. The hub starts only after it succeeds. Re-run manually with
+  #   docker compose run --rm migrate
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: proba-hub:local
+    container_name: proba-hub-migrate
+    command: ["node", "dist/db/migrate-cli.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://proba:proba@postgres:5432/proba_hub
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (a unique random value) to run the production image}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    restart: "no"
+
   hub:
     build:
       context: .
       dockerfile: Dockerfile
+    image: proba-hub:local
     container_name: proba-hub
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       PORT: 3000

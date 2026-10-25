@@ -96,6 +96,30 @@ services:
       - jwt_secret
       - postgres_password
 
+  # One-shot job: applies pending SQL migrations with the compiled entry point,
+  # then exits. Docker 20.10+. Run it BEFORE rolling out new hub replicas:
+  #   docker stack deploy -c deploy/stack.yml proba   (job runs on each deploy)
+  # or manually: docker service create --restart-condition none ... node dist/db/migrate-cli.js
+  # Concurrent runners are serialized by a Postgres advisory lock.
+  migrate:
+    image: ${REGISTRY:-ghcr.io/smallseedlabs}/proba-hub:${VERSION:-latest}
+    command: ["node", "dist/db/migrate-cli.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      LOG_LEVEL: info
+    networks:
+      - proba-network
+    deploy:
+      mode: replicated-job
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    secrets:
+      - jwt_secret
+
 networks:
   proba-network:
     driver: overlay

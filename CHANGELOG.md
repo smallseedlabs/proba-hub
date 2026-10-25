@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Users are upserted by Firebase uid (migration `003_firebase_auth`: `firebase_uid`,
   `email_verified`, `last_sign_in_at`); optional `AUTH_ALLOWED_EMAIL_DOMAINS`.
 
+### Fixed
+
+- The Hub reads `JWT_SECRET_FILE` (Docker/Swarm secret), which takes precedence over
+  `JWT_SECRET`; it now refuses to start in production without a secret or with the
+  development default (the Swarm stack already set `JWT_SECRET_FILE`, which was ignored).
+- The production image can run migrations: `npm run build` copies the `.sql` files into
+  `dist/`, `node dist/db/migrate-cli.js` (`npm run migrate:prod`) needs no tsx, and
+  compose/stack have a one-shot `migrate` service. Runners are serialized by an advisory lock.
+
 ### Removed
 
 - Hub-managed passwords: `POST /v1/auth/login`, `npm run user:create` and

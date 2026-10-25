@@ -97,17 +97,20 @@ Key variables:
 The easiest way to run the full stack:
 
 ```bash
-# Start all services (hub + postgres + redis)
+# JWT_SECRET is required: the production image refuses a missing/dev-default secret
+export JWT_SECRET="$(openssl rand -base64 48)"
+
+# Start all services (postgres + redis, then the one-shot `migrate` job, then hub)
 docker compose up -d
 
 # View logs
 docker compose logs -f hub
 
-# Run migrations
-docker compose exec hub npm run migrate
+# Re-run migrations by hand (compiled entry point, no tsx; also runs on `up`)
+docker compose run --rm migrate
 
-# Seed demo data
-docker compose exec hub npm run seed
+# Seed demo data is a development tool (needs tsx + sources): run `npm run seed`
+# on the host against the published Postgres port.
 
 # Stop all services
 docker compose down
@@ -395,7 +398,8 @@ curl -X POST http://localhost:3000/v1/commands \
 - `npm run test:integration` - Run integration tests (needs Postgres + Redis)
 - `npm run test:ci` / `npm run test:integration:ci` - Same, plus a JSON report check
   that fails on any skipped/todo test and requires the SSE and concurrency suites
-- `npm run migrate` - Run database migrations
+- `npm run migrate` - Run database migrations (tsx, from `src/`)
+- `npm run migrate:prod` - Run them with the compiled entry point (`node dist/db/migrate-cli.js`, what the image and the `migrate` compose/stack job run)
 - `npm run seed` - Seed demo data
 
 ### Mock Brain Scenarios

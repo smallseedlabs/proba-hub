@@ -8,6 +8,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY scripts/copy-sql.mjs ./scripts/copy-sql.mjs
 
 RUN npm run build
 

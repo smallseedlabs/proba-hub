@@ -4,15 +4,19 @@ import { fileURLToPath } from 'url';
 import { pool, query } from './client.js';
 import { logger } from '../logger.js';
 
+/** Resolved next to this file, so it works from src/ (tsx) and from dist/ (the compiled image). */
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-interface Migration {
+/** Arbitrary constant: pg_advisory_lock key for the Hub migration runner. */
+const MIGRATION_LOCK_KEY = 727274001;
+
+export interface Migration {
   id: number;
   name: string;
   file: string;
 }
 
-const migrations: Migration[] = [
+export const migrations: Migration[] = [
   { id: 1, name: 'initial_schema', file: '001_initial_schema.sql' },
   { id: 2, name: 'password_auth', file: '002_password_auth.sql' },
   { id: 3, name: 'firebase_auth', file: '003_firebase_auth.sql' },
@@ -55,31 +59,39 @@ async function applyMigration(migration: Migration): Promise<void> {
   }
 }
 
-async function migrate(): Promise<void> {
+/**
+ * Apply every pending migration in order. Safe to call repeatedly (applied ids are
+ * recorded in `migrations`). Does not close the pool; the CLI entry point does.
+ */
+export async function runMigrations(): Promise<{ applied: number[] }> {
+  // Serialize concurrent runners (e.g. a one-shot job racing a manual run).
+  const lock = await pool.connect();
   try {
-    await ensureMigrationsTable();
-    const applied = await getAppliedMigrations();
-    
-    const pending = migrations.filter(m => !applied.has(m.id));
-    
-    if (pending.length === 0) {
-      logger.info('No pending migrations');
-      return;
-    }
-    
-    logger.info({ count: pending.length }, 'Applying migrations');
-    
-    for (const migration of pending) {
-      await applyMigration(migration);
-    }
-    
-    logger.info('All migrations applied successfully');
-  } catch (error) {
-    logger.error({ error }, 'Migration failed');
-    throw error;
+    await lock.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+    return await applyPending();
   } finally {
-    await pool.end();
+    await lock.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]).catch(() => undefined);
+    lock.release();
   }
 }
 
-migrate();
+async function applyPending(): Promise<{ applied: number[] }> {
+  await ensureMigrationsTable();
+  const applied = await getAppliedMigrations();
+
+  const pending = migrations.filter(m => !applied.has(m.id));
+
+  if (pending.length === 0) {
+    logger.info('No pending migrations');
+    return { applied: [] };
+  }
+
+  logger.info({ count: pending.length }, 'Applying migrations');
+
+  for (const migration of pending) {
+    await applyMigration(migration);
+  }
+
+  logger.info('All migrations applied successfully');
+  return { applied: pending.map(m => m.id) };
+}
