@@ -1,4 +1,5 @@
 import { config as loadEnv } from 'dotenv';
+import { resolveJwtSecret } from './auth/jwt-secret.js';
 
 loadEnv();
 
@@ -24,7 +25,8 @@ export const config = {
   },
   
   auth: {
-    jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
+    /** JWT_SECRET_FILE wins over JWT_SECRET; production refuses a missing/dev-default secret. */
+    jwtSecret: resolveJwtSecret(),
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
     /** Failed POST /v1/auth/session attempts allowed per IP per window. */
     sessionRateLimitMax: parseInt(process.env.AUTH_SESSION_RATE_LIMIT_MAX || '30', 10),

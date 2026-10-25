@@ -88,7 +88,7 @@ Key variables:
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
 - `FIREBASE_PROJECT_ID`: Firebase project whose ID tokens are accepted for sign-in
-- `JWT_SECRET`: Signs Hub session tokens (change in production!)
+- `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
 - `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
 
