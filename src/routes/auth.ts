@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { pool } from '../db/client.js';
+import { pool, transaction } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import type { User } from '../types.js';
@@ -7,6 +7,42 @@ import { FirebaseTokenError, type FirebaseTokenVerifier } from '../auth/firebase
 import { resolveFirebaseUser, UserResolutionError } from '../auth/firebase-users.js';
 import { FixedWindowRateLimiter } from '../auth/rate-limit.js';
 import { issueSession } from '../auth/sessions.js';
+import { getAudit } from '../audit/service.js';
+import { auditAuthDenied } from '../audit/auth-denied.js';
+import { setTraceUser } from '../audit/trace.js';
+import type { PgQueryable } from '../audit/vendor/proba-audit/index.js';
+
+/** auth.sign_in (the request's root event) + auth.session_issued, in the session's own transaction. */
+async function issueAuditedSession(
+  fastify: FastifyInstance,
+  userId: string,
+  method: 'firebase' | 'dev_login',
+  details: Record<string, unknown> = {}
+) {
+  setTraceUser(userId);
+  const audit = getAudit();
+  return transaction(async (client) => {
+    const session = await issueSession(fastify, userId, client as PgQueryable);
+    const target = { type: 'user', id: userId };
+    const signIn = await audit.emit(
+      { action: 'auth.sign_in', outcome: 'success', root: true, userId, target, details: { method, ...details } },
+      { tx: client }
+    );
+    await audit.emit(
+      {
+        action: 'auth.session_issued',
+        outcome: 'success',
+        userId,
+        target,
+        ...(signIn ? { parentSpanId: signIn.spanId } : {}),
+        details: { method, expiresAt: session.expiresAt.toISOString() },
+      },
+      { tx: client }
+    );
+    return session;
+  });
+}
+
 
 export interface Workspace {
   id: string;
@@ -106,13 +142,16 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
       const retryAfter = failuresByIp.retryAfter(ipKey);
       if (retryAfter > 0) {
         logger.warn({ ip: request.ip }, 'Session exchange rate limited');
+        await auditAuthDenied(request, 'rate_limited');
         return tooManyAttempts(reply, retryAfter);
       }
 
       try {
         const identity = await verify(request.body.idToken);
         const user = await resolveFirebaseUser(identity, { allowedEmailDomains: opts.allowedEmailDomains });
-        const session = await issueSession(fastify, user.id);
+        const session = await issueAuditedSession(fastify, user.id, 'firebase', {
+          provider: identity.signInProvider,
+        });
         logger.info({ userId: user.id, provider: identity.signInProvider }, 'Sign-in succeeded');
 
         const body: SessionResponse = {
@@ -126,6 +165,16 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
         if (error instanceof FirebaseTokenError) {
           failuresByIp.hit(ipKey);
           logger.info({ ip: request.ip, reason: error.message }, 'Sign-in rejected');
+          await getAudit().emit({
+            action: 'auth.denied',
+            outcome: 'failure',
+            root: true,
+            actor: { type: 'system', id: 'anonymous' },
+            target: { type: 'route', id: 'POST /v1/auth/session' },
+            errorCode: error.code,
+            riskLevel: 'medium',
+            details: { method: 'firebase' },
+          });
           return reply.code(401).send({
             error: error.code,
             message:
@@ -137,6 +186,16 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
         if (error instanceof UserResolutionError) {
           failuresByIp.hit(ipKey);
           logger.info({ ip: request.ip, reason: error.code }, 'Sign-in refused');
+          await getAudit().emit({
+            action: 'auth.denied',
+            outcome: 'denied',
+            root: true,
+            actor: { type: 'system', id: 'anonymous' },
+            target: { type: 'route', id: 'POST /v1/auth/session' },
+            errorCode: error.code,
+            riskLevel: 'medium',
+            details: { method: 'firebase' },
+          });
           return reply.code(RESOLUTION_STATUS[error.code]).send({ error: error.code, message: error.message });
         }
         throw error;
@@ -145,7 +204,27 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
   );
 
   fastify.post('/auth/logout', { onRequest: [fastify.authenticate] }, async (request, reply) => {
-    await pool.query('DELETE FROM sessions WHERE token_hash = $1', [request.sessionTokenHash]);
+    const userId = request.user!.id;
+    await transaction(async (client) => {
+      const audit = getAudit();
+      await client.query('DELETE FROM sessions WHERE token_hash = $1', [request.sessionTokenHash]);
+      const target = { type: 'user', id: userId };
+      const signOut = await audit.emit(
+        { action: 'auth.sign_out', outcome: 'success', root: true, userId, target },
+        { tx: client }
+      );
+      await audit.emit(
+        {
+          action: 'auth.session_revoked',
+          outcome: 'success',
+          userId,
+          target,
+          ...(signOut ? { parentSpanId: signOut.spanId } : {}),
+          details: { reason: 'sign_out' },
+        },
+        { tx: client }
+      );
+    });
     logger.info({ userId: request.user?.id }, 'Signed out');
     return reply.code(204).send();
   });
@@ -193,7 +272,7 @@ export async function devAuthRoutes(fastify: FastifyInstance) {
         user = created.rows[0];
       }
 
-      const session = await issueSession(fastify, user.id);
+      const session = await issueAuditedSession(fastify, user.id, 'dev_login');
 
       reply.send({
         token: session.token,
