@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { getAudit } from '../audit/service.js';
+import { currentTrace, runWithTrace } from '../audit/trace.js';
 import { sseManager } from '../services/sse-manager.js';
 import { buildEventEnvelope, EVENT_SELECT, type EventRow } from '../services/event-envelope.js';
 import type { SSEConnection } from '../types.js';
@@ -126,6 +128,10 @@ function handleSSE(
 ): void {
   reply.hijack();
   const res = reply.raw;
+  const openedAt = Date.now();
+  // Socket 'close' callbacks run outside the request's async context, so keep the
+  // trace to stamp the disconnect event with the same traceId as the connect.
+  const trace = currentTrace();
 
   let lastSeq = initialSeq;
   let closed = false;
@@ -185,7 +191,27 @@ function handleSSE(
     sseManager.removeConnection(connection);
     openStreams.delete(cleanup);
     if (!res.writableEnded) res.end();
-    logger.info({ userId, lastSeq }, 'SSE connection closed');
+    const log = () => logger.info({ userId, lastSeq }, 'SSE connection closed');
+    if (trace) {
+      runWithTrace(trace, () => {
+        log();
+        void getAudit().emit(
+          {
+            action: 'data_access.read',
+            outcome: 'success',
+            userId,
+            target: { type: 'event_stream', id: userId },
+            riskLevel: 'low',
+            durationMs: Date.now() - openedAt,
+            tags: ['sse'],
+            details: { phase: 'disconnect', lastSeq },
+          },
+          { bestEffort: true }
+        );
+      });
+    } else {
+      log();
+    }
   }
 
   // 1. Listen first, then replay.
@@ -217,4 +243,17 @@ function handleSSE(
   }, heartbeatIntervalMs);
 
   logger.info({ userId, lastSeq: initialSeq }, 'SSE connection established');
+  void getAudit().emit(
+    {
+      action: 'data_access.read',
+      outcome: 'success',
+      root: true,
+      userId,
+      target: { type: 'event_stream', id: userId },
+      riskLevel: 'low',
+      tags: ['sse'],
+      details: { phase: 'connect', resumeFromSeq: initialSeq },
+    },
+    { bestEffort: true }
+  );
 }
