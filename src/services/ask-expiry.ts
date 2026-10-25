@@ -2,6 +2,8 @@ import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { kickOutboxRelay } from './outbox-relay.js';
+import { getAudit } from '../audit/service.js';
+import { runAsJob } from '../audit/trace.js';
 
 let expiryTimer: NodeJS.Timeout | null = null;
 let refCount = 0;
@@ -11,12 +13,28 @@ export function startAskExpiryJob(): void {
   refCount++;
   if (expiryTimer) return;
 
-  expiryTimer = setInterval(async () => {
-    try {
-      await processExpiredAsks();
-    } catch (error) {
-      logger.error({ error }, 'Ask expiry job error');
-    }
+  // Each run is its own trace root (the protocol: "a job run id for background work").
+  expiryTimer = setInterval(() => {
+    void runAsJob(async () => {
+      try {
+        await processExpiredAsks();
+      } catch (error) {
+        logger.error({ error }, 'Ask expiry job error');
+        await getAudit().emit(
+          {
+            action: 'system.error',
+            outcome: 'failure',
+            root: true,
+            actor: { type: 'system', id: 'ask-expiry' },
+            errorCode: 'ask_expiry_failed',
+            errorMessage: error instanceof Error ? error.message : String(error),
+            riskLevel: 'medium',
+            details: { component: 'ask_expiry' },
+          },
+          { bestEffort: true }
+        );
+      }
+    });
   }, config.ask.expiryCheckIntervalMs);
   expiryTimer.unref();
 
@@ -32,7 +50,7 @@ export function stopAskExpiryJob(): void {
   }
 }
 
-async function processExpiredAsks(): Promise<void> {
+export async function processExpiredAsks(): Promise<void> {
   const result = await pool.query(
     `SELECT id, thread_id, on_expire, status
      FROM asks
@@ -40,6 +58,17 @@ async function processExpiredAsks(): Promise<void> {
        AND expires_at < NOW()
        AND status = 'pending'`
   );
+
+  if (result.rows.length > 0) {
+    // Only runs that did something are audited; an idle run every minute would be noise.
+    await getAudit().emit({
+      action: 'system.job_run',
+      outcome: 'success',
+      root: true,
+      actor: { type: 'system', id: 'ask-expiry' },
+      details: { job: 'ask_expiry', expiredAsks: result.rows.length },
+    });
+  }
 
   for (const ask of result.rows) {
     await handleExpiredAsk(ask.id, ask.thread_id, ask.on_expire);
@@ -114,6 +143,20 @@ async function handleExpiredAsk(
     await client.query(
       'INSERT INTO outbox (user_id, event_id) VALUES ($1, $2)',
       [userId, eventResult.rows[0].id]
+    );
+
+    await getAudit().emit(
+      {
+        action: 'approval.expired',
+        outcome: 'success',
+        actor: { type: 'system', id: 'ask-expiry' },
+        userId,
+        threadId,
+        target: { type: 'ask', id: askId },
+        riskLevel: 'low',
+        details: { onExpire, resolution },
+      },
+      { tx: client }
     );
 
     await client.query('COMMIT');

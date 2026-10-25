@@ -88,26 +88,30 @@ Key variables:
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
 - `FIREBASE_PROJECT_ID`: Firebase project whose ID tokens are accepted for sign-in
-- `JWT_SECRET`: Signs Hub session tokens (change in production!)
+- `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
 - `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
+- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`): see [Audit trail](#audit-trail)
 
 ### Running with Docker Compose
 
 The easiest way to run the full stack:
 
 ```bash
-# Start all services (hub + postgres + redis)
+# JWT_SECRET is required: the production image refuses a missing/dev-default secret
+export JWT_SECRET="$(openssl rand -base64 48)"
+
+# Start all services (postgres + redis, then the one-shot `migrate` job, then hub)
 docker compose up -d
 
 # View logs
 docker compose logs -f hub
 
-# Run migrations
-docker compose exec hub npm run migrate
+# Re-run migrations by hand (compiled entry point, no tsx; also runs on `up`)
+docker compose run --rm migrate
 
-# Seed demo data
-docker compose exec hub npm run seed
+# Seed demo data is a development tool (needs tsx + sources): run `npm run seed`
+# on the host against the published Postgres port.
 
 # Stop all services
 docker compose down
@@ -191,7 +195,7 @@ Response (the contract proba-web expects):
 {
   "token": "eyJhbG...",
   "user": { "id": "...", "email": "ana@example.com", "name": "Ana Example" },
-  "workspaces": [{ "id": "default", "name": "My workspace" }],
+  "workspaces": [{ "id": "seedbed", "name": "Seedbed" }],
   "expiresAt": "2026-10-27T00:00:00.000Z"
 }
 ```
@@ -213,7 +217,7 @@ email as verified.
 | 429 | `rate_limited` | Too many failed exchanges from this IP (`AUTH_SESSION_RATE_LIMIT_MAX`) |
 | 503 | `auth_not_configured` | `FIREBASE_PROJECT_ID` not set |
 
-Workspaces are not modelled yet; every user gets one `default` workspace.
+Workspaces are not modelled yet; every user gets one `seedbed` workspace ("Seedbed"; it was `default` / "My workspace" before). There is no workspace table or column, so no data migration is needed.
 
 **POST** `/v1/auth/logout` (Bearer token) deletes the Hub session: the token
 stops working immediately for `/v1/commands`, `/v1/events` and every read.
@@ -395,7 +399,8 @@ curl -X POST http://localhost:3000/v1/commands \
 - `npm run test:integration` - Run integration tests (needs Postgres + Redis)
 - `npm run test:ci` / `npm run test:integration:ci` - Same, plus a JSON report check
   that fails on any skipped/todo test and requires the SSE and concurrency suites
-- `npm run migrate` - Run database migrations
+- `npm run migrate` - Run database migrations (tsx, from `src/`)
+- `npm run migrate:prod` - Run them with the compiled entry point (`node dist/db/migrate-cli.js`, what the image and the `migrate` compose/stack job run)
 - `npm run seed` - Seed demo data
 
 ### Mock Brain Scenarios
@@ -421,6 +426,78 @@ goal and emits a `goal_updated` event with a `goal_summary` UI, which is what
 proba-web's Goals and Campaigns screens render. Creating a goal always emits
 an initial `goal_updated`.
 
+## Audit trail
+
+The Hub emits a protocol v0.2.0 `AuditEvent` (`@smallseedlabs/proba-protocol/audit`) for every
+action, through a transactional outbox, to the audit pipeline of
+[proba-audit](https://github.com/smallseedlabs/proba-audit):
+
+```
+Hub action ──same DB transaction──> audit_outbox ──AuditRelay──> Redis Stream ──audit-consumer──> ClickHouse
+```
+
+- **Same transaction.** Events are inserted into `audit_outbox` (migration `004_audit_outbox`) with the
+  business change (`emit(draft, { tx: client })`), so an event exists if and only if the change
+  committed. Events with no business change (denied sign-in, SSE connect) are single-statement
+  transactions. If the database refuses the insert the action fails and rolls back (fail closed); an
+  event that fails protocol validation is logged at error level and dropped (fail open).
+- **Relay.** `AuditRelay` is a separate background loop (`AUDIT_RELAY_ENABLED`) that claims rows with
+  `FOR UPDATE SKIP LOCKED`, publishes them to `AUDIT_STREAM` (same entry format as proba-audit's Redis
+  adapter) with the Hub's existing Redis client, and marks them published. Delivery is at-least-once;
+  the consumer dedupes by `eventId`. It does not touch the SSE relay or the `proba:events` pub/sub channel.
+  With `AUDIT_RELAY_ENABLED=false` events keep accumulating in `audit_outbox` until a relay runs.
+- **Vendored code.** The emitter, outbox store, relay and stream publisher are copies of proba-audit
+  `038d63f` under `src/audit/vendor/proba-audit/` (see its README) behind the same `AuditEmitter` /
+  `OutboxStore` interfaces, so they can be swapped for published packages later.
+- **One traceId per request.** For `POST /v1/commands` the traceId is the command's `clientMsgId` (a UUID
+  in the protocol). Otherwise (other routes, or a `clientMsgId` that is not a UUID: the id is then
+  recorded in `details.clientMsgId`) a UUID is generated; background jobs get a fresh id per run. The
+  traceId flows through `AsyncLocalStorage` to the handler, command processor, brain call and DB writes,
+  is on every log line (`traceId`), and is returned as `X-Trace-Id` (exposed via CORS). Spans are
+  OpenTelemetry style: the request's first event is the root span; the brain call is a child span and
+  its plan/tool/decision events are children of it. The event envelope itself has no trace field, so
+  the protocol is unchanged and the traceId is not added to SSE events.
+- **No secrets, no PII.** `details` pass through a redactor (`src/audit/redact.ts`): secret-named keys,
+  personal keys (email, phone, ip, ...), bearer tokens, JWTs and email-shaped strings are removed or
+  masked and size is bounded. Callers record ids and sizes, never message text, brain output text, tool
+  parameter values, tokens or addresses.
+
+### Events emitted
+
+| Action | Category | When |
+| --- | --- | --- |
+| `auth.sign_in` | auth | Firebase sign-in succeeded (`/v1/auth/session`), or `/dev/login` |
+| `auth.session_issued` | auth | Session row created (child of `auth.sign_in`) |
+| `auth.sign_out` | auth | `POST /v1/auth/logout` |
+| `auth.session_revoked` | auth | Session row deleted (child of `auth.sign_out`) |
+| `auth.denied` | auth | Invalid Firebase token (`failure`), user not allowed / rate limited (`denied`), missing or invalid bearer token (`denied`, throttled to one per client and reason per minute) |
+| `command.received` | command | Root event of every `POST /v1/commands` |
+| `command.accepted` | command | Command passed validation (202 accepted); same transaction as thread creation |
+| `command.rejected` | command | Envelope/payload validation failed (`failure`) or thread not owned (`denied`) |
+| `command.processed` | command | Processing finished (`success`) or failed (`failure`, also when the processing transaction rolled back) |
+| `command.duplicate` | command | Same `clientMsgId` replayed (idempotent) |
+| `brain.llm_call` | brain | Brain invoked; details hold output types and sizes (never text) |
+| `brain.clarify_requested` / `brain.plan_created` / `brain.decision_made` | brain | Brain output of that kind (child of the brain span) |
+| `brain.error` | brain | Brain threw, or returned an invalid output / one that could not be stored |
+| `tool.called` | tool | Brain proposed a tool call (`partial` while it needs approval; the Hub executes no tools; parameter names only) |
+| `approval.requested` | approval | Plan or tool call waiting for approval |
+| `approval.granted` / `approval.rejected` | approval | `approve_plan`, or `answer_ask` on a plan/action approval |
+| `approval.expired` | approval | Ask expired (job run) |
+| `data_access.write` | data_access | Goal created/updated (`details.change`), clarification answered |
+| `data_access.read` | data_access | SSE stream connect / disconnect (`details.phase`, low risk) |
+| `policy.evaluated` | policy | Budget recorded for a goal, or a tool call's cost impact (`details.enforced: false`) |
+| `policy.denied` | policy | Thread ownership check failed |
+| `config.changed` | config | pause / resume / emergency stop (`kill`: `riskLevel: high`, tag `emergency_stop`) |
+| `system.started` / `system.stopped` | system | Hub boot / shutdown |
+| `system.job_run` | system | Ask-expiry run that expired something (its own traceId) |
+| `system.error` | system | Unhandled 5xx, command processing failure, ask-expiry job failure |
+
+Actions are the ones in the protocol's `AUDIT_ACTIONS`; the Hub does not invent names. Reads (polling
+`GET /v1/events?after=`, `/v1/threads`, ...) are not audited.
+
+Known limits: the Hub has no budget enforcement, so budget events are informational; pause/resume/kill
+only emit a `status` event (the mock brain does not really stop); `auth.denied` throttling is per replica.
+
 ## Deployment
 
 ### Docker Swarm
@@ -442,7 +519,20 @@ docker stack services proba
 docker service logs -f proba_hub
 ```
 
-The stack runs 3 replicas of the Hub with shared Postgres and Redis.
+The stack runs 3 replicas of the Hub with shared Postgres and Redis, plus a one-shot `migrate` job
+(`replicated-job`, Docker 20.10+) that applies pending migrations with the compiled entry point
+(`node dist/db/migrate-cli.js`). Concurrent runners are serialized by a Postgres advisory lock.
+
+**Known limits with several replicas (not fixed here):**
+
+- The mock brain keeps its scenario step counter (`threadStates`) in process memory. A thread's steps
+  only advance correctly when all its commands reach the same replica, which three replicas behind
+  a round-robin ingress do not guarantee. The real brain is expected to be stateless.
+- The session-exchange rate limiter (`FixedWindowRateLimiter`) and the `auth.denied` audit throttle are
+  per replica, so the effective limits are multiplied by the replica count.
+- Every replica runs an audit relay by default. That is safe (rows are claimed with `SKIP LOCKED`) but
+  stream order between batches of different replicas is not strictly the outbox order. Set
+  `AUDIT_RELAY_ENABLED=false` on all but one replica if strict order matters to the consumer.
 
 ### Environment-Specific Configs
 
@@ -480,4 +570,4 @@ Apache License 2.0 © Small Seed Labs
 
 **Note**: This is a PUBLIC repository. Never commit secrets. Use `.env` for local development and secrets management for production.
 
-**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.1.2` release tag.
+**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.2.0` release tag.

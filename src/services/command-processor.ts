@@ -13,6 +13,8 @@ import type {
 } from '@smallseedlabs/proba-protocol';
 import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
 import { toJsonb } from '../db/jsonb.js';
+import { getAudit } from '../audit/service.js';
+import { runInSpan, startSpan, type Span } from '../audit/trace.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -27,6 +29,45 @@ interface GoalRow {
   budget: { daily?: number; total?: number; currency?: string } | null;
 }
 
+/** A brain call that threw. Carries the call's span so the failure can be audited even when the transaction rolls back. */
+export class BrainCallError extends Error {
+  constructor(
+    readonly cause: unknown,
+    readonly span: Span,
+    readonly durationMs: number,
+    readonly trigger: string
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'BrainCallError';
+  }
+}
+
+interface AuditScope {
+  userId: string;
+  threadId?: string;
+  commandType: string;
+}
+
+/** Type and size of a brain output, never its content. Safe for audit details on any input. */
+function summarizeOutput(output: unknown): Record<string, unknown> {
+  const o = (output ?? {}) as Record<string, unknown>;
+  const type = typeof o.type === 'string' ? o.type.slice(0, 32) : 'unknown';
+  switch (type) {
+    case 'reply':
+      return { type, textLength: typeof o.text === 'string' ? o.text.length : 0 };
+    case 'tool_call':
+      return { type, tool: typeof o.tool === 'string' ? o.tool.slice(0, 64) : 'unknown' };
+    case 'plan':
+      return { type, stepCount: Array.isArray(o.steps) ? o.steps.length : 0 };
+    case 'clarify':
+      return { type, questionCount: Array.isArray(o.questions) ? o.questions.length : 0 };
+    case 'decision':
+      return { type, decision: typeof o.decision === 'string' ? o.decision.slice(0, 16) : 'unknown' };
+    default:
+      return { type };
+  }
+}
+
 export class CommandProcessor {
   constructor(private brain: BrainPort) {}
 
@@ -34,18 +75,81 @@ export class CommandProcessor {
     userId: string,
     envelope: CommandEnvelope
   ): Promise<{ command: Command; events: Event[] }> {
-    const result = await transaction((client) => this.processInTransaction(client, userId, envelope));
+    const startedAt = Date.now();
+    const result = await transaction((client) => this.processInTransaction(client, userId, envelope, startedAt));
     // Only now are the events committed and visible to the relay. Kicking from
     // inside the transaction callback raced COMMIT and fell back to the poll.
     void kickOutboxRelay();
     return result;
   }
 
+  /**
+   * The processing transaction rolled back, so none of its audit events exist.
+   * Record the failure in its own transaction, under the same traceId.
+   */
+  async auditProcessingFailure(userId: string, envelope: CommandEnvelope, error: unknown): Promise<void> {
+    const audit = getAudit();
+    const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      if (error instanceof BrainCallError) {
+        await audit.emit(
+          {
+            action: 'brain.error',
+            outcome: 'failure',
+            userId,
+            threadId: envelope.threadId,
+            spanId: error.span.spanId,
+            parentSpanId: error.span.parentSpanId,
+            errorCode: 'brain_failed',
+            errorMessage: message,
+            riskLevel: 'medium',
+            durationMs: error.durationMs,
+            details: { trigger: error.trigger },
+          },
+          { bestEffort: true }
+        );
+      }
+      await audit.emit(
+        {
+          action: 'command.processed',
+          outcome: 'failure',
+          userId,
+          threadId: envelope.threadId,
+          errorCode: 'command_processing_failed',
+          errorMessage: message,
+          details: { commandType: scope.commandType, rolledBack: true },
+        },
+        { bestEffort: true }
+      );
+      await audit.emit(
+        {
+          action: 'system.error',
+          outcome: 'failure',
+          actor: { type: 'service', id: 'hub' },
+          userId,
+          threadId: envelope.threadId,
+          errorCode: 'command_processing_failed',
+          errorMessage: message,
+          riskLevel: 'medium',
+          details: { component: 'command_processor', commandType: scope.commandType },
+        },
+        { bestEffort: true }
+      );
+    } catch {
+      // bestEffort emits never throw; this only guards the logging above.
+    }
+  }
+
   private async processInTransaction(
     client: PoolClient,
     userId: string,
-    envelope: CommandEnvelope
+    envelope: CommandEnvelope,
+    startedAt: number
   ): Promise<{ command: Command; events: Event[] }> {
+    const audit = getAudit();
+    const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
+
     // INSERT ... ON CONFLICT DO NOTHING is race-safe: a concurrent duplicate
     // waits for the first transaction and then becomes a no-op, instead of
     // failing with a unique violation (check-then-insert was racy).
@@ -58,11 +162,22 @@ export class CommandProcessor {
         'Command already processed (idempotent)'
       );
       const events = existingCommand ? await this.getCommandEvents(client, existingCommand.id) : [];
+      await audit.emit(
+        {
+          action: 'command.duplicate',
+          outcome: 'success',
+          userId,
+          threadId: envelope.threadId,
+          target: existingCommand ? { type: 'command', id: existingCommand.id } : undefined,
+          details: { commandType: envelope.type, replayedEvents: events.length },
+        },
+        { tx: client }
+      );
       return { command: existingCommand!, events };
     }
 
     if (envelope.type === 'control') {
-      return this.processControl(client, userId, command, envelope);
+      return this.processControl(client, userId, command, envelope, startedAt);
     }
 
     const events: Event[] = [];
@@ -75,10 +190,15 @@ export class CommandProcessor {
       const context = await this.buildContext(client, userId, envelope.threadId);
       
       let brainOutputs: BrainOutput[];
+      let brainSpan: Span;
       try {
-        brainOutputs = await this.brain.process(envelope, context);
+        ({ outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, envelope, context));
       } catch (error) {
-        logger.error({ error, userId, command: envelope.type }, 'Brain processing failed');
+        // Only a failing brain is turned into an error event. Anything else (for
+        // example the audit insert) must roll the command back.
+        if (!(error instanceof BrainCallError)) throw error;
+        const cause = error.cause;
+        logger.error({ error: cause, userId, command: envelope.type }, 'Brain processing failed');
         
         const errorEvent = await this.createErrorEvent(
           client,
@@ -89,6 +209,8 @@ export class CommandProcessor {
         );
         
         await this.addToOutbox(client, userId, errorEvent.id);
+        await this.auditBrainFailure(client, scope, error, cause);
+        await this.auditProcessed(client, scope, startedAt, [errorEvent], 'failure', 'brain_error');
         return { command, events: [errorEvent] };
       }
       
@@ -112,14 +234,17 @@ export class CommandProcessor {
           } catch (innerError) {
             logger.error({ error: innerError }, 'Failed to create error event for invalid output');
           }
+          await this.auditInvalidOutput(client, scope, brainSpan, output);
           continue;
         }
 
         // Savepoint: a failed output must not abort the whole transaction,
         // otherwise the error event below (and the command row) are lost too.
         await client.query('SAVEPOINT brain_output');
+        let event: Event | undefined;
+        let outputError: unknown;
         try {
-          const event = await this.processBrainOutput(
+          event = await this.processBrainOutput(
             client,
             userId,
             envelope.threadId,
@@ -129,8 +254,11 @@ export class CommandProcessor {
           await this.addToOutbox(client, userId, event.id);
           await client.query('RELEASE SAVEPOINT brain_output');
         } catch (error) {
+          outputError = error;
           await client.query('ROLLBACK TO SAVEPOINT brain_output');
           logger.error({ error, output }, 'Failed to process brain output');
+          if (event) events.splice(events.indexOf(event), 1);
+          event = undefined;
           
           // Surface error as error event
           try {
@@ -149,6 +277,11 @@ export class CommandProcessor {
             logger.error({ error: innerError }, 'Failed to create error event');
           }
         }
+        // Audit after the savepoint is settled: a database failure here must
+        // propagate and roll the whole command back, not be swallowed as a
+        // "failed output".
+        if (event) await this.auditBrainOutput(client, scope, brainSpan, output, event);
+        else await this.auditInvalidOutput(client, scope, brainSpan, output, 'brain_output_failed', outputError);
       }
     }
 
@@ -161,10 +294,16 @@ export class CommandProcessor {
       const brainEnvelope = await this.withAskType(client, envelope);
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
+      await this.auditAskAnswered(
+        client,
+        scope,
+        answerPayload,
+        (brainEnvelope.payload as unknown as Record<string, unknown>).askType
+      );
       
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const brainOutputs = await this.brain.process(brainEnvelope, context);
+      const { outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, brainEnvelope, context);
       
       for (const output of brainOutputs) {
         if (!isBrainOutput(output)) {
@@ -179,12 +318,14 @@ export class CommandProcessor {
           );
           events.push(errorEvent.rows[0]);
           await this.addToOutbox(client, userId, errorEvent.rows[0].id);
+          await this.auditInvalidOutput(client, scope, brainSpan, output);
           continue;
         }
         
         const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
         events.push(event);
         await this.addToOutbox(client, userId, event.id);
+        await this.auditBrainOutput(client, scope, brainSpan, output, event);
       }
     }
 
@@ -196,10 +337,11 @@ export class CommandProcessor {
       // client (and a reload) sees it as decided.
       const planResolved = await this.resolvePlanAsk(client, userId, envelope.threadId, planPayload);
       if (planResolved) events.push(planResolved);
+      await this.auditPlanDecision(client, scope, planPayload, planResolved !== null);
       
       // After approving plan, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const brainOutputs = await this.brain.process(envelope, context);
+      const { outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, envelope, context);
       logger.debug({ outputCount: brainOutputs.length, outputs: brainOutputs }, 'Brain outputs after approve_plan');
       
       for (const output of brainOutputs) {
@@ -215,12 +357,14 @@ export class CommandProcessor {
           );
           events.push(errorEvent.rows[0]);
           await this.addToOutbox(client, userId, errorEvent.rows[0].id);
+          await this.auditInvalidOutput(client, scope, brainSpan, output);
           continue;
         }
         
         const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
         events.push(event);
         await this.addToOutbox(client, userId, event.id);
+        await this.auditBrainOutput(client, scope, brainSpan, output, event);
       }
     }
 
@@ -229,18 +373,336 @@ export class CommandProcessor {
 
     if (envelope.type === 'create_goal') {
       const goal = await this.createGoal(client, userId, envelope.threadId!, envelope.payload as CreateGoalPayload);
-      events.push(await this.emitGoalUpdated(client, userId, envelope.threadId!, goal, goalUpdate ?? {}));
+      events.push(await this.emitGoalUpdated(client, userId, envelope.threadId!, goal, goalUpdate ?? {}, 'created'));
     } else if (goalUpdate && envelope.threadId) {
       const goal = await this.latestGoal(client, envelope.threadId);
-      if (goal) events.push(await this.emitGoalUpdated(client, userId, envelope.threadId, goal, goalUpdate));
+      if (goal) events.push(await this.emitGoalUpdated(client, userId, envelope.threadId, goal, goalUpdate, 'updated'));
     }
 
     await client.query(
       'UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2',
       ['processed', command.id]
     );
+    await this.auditProcessed(client, scope, startedAt, events, 'success');
 
     return { command, events };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Audit helpers. Every one writes through the command's own transaction
+  // (`tx: client`), so an event exists if and only if the change it describes
+  // committed. Parents: the request's root span -> brain call -> output/tool.
+  // ---------------------------------------------------------------------------
+
+  /** Call the brain inside its own span and audit the call (brain.llm_call). */
+  private async callBrain(
+    client: PoolClient,
+    scope: AuditScope,
+    envelope: CommandEnvelope,
+    context: BrainContext
+  ): Promise<{ outputs: BrainOutput[]; span: Span }> {
+    const span = startSpan();
+    const started = Date.now();
+    let outputs: BrainOutput[];
+    try {
+      outputs = await runInSpan(span, () => this.brain.process(envelope, context));
+    } catch (error) {
+      throw new BrainCallError(error, span, Date.now() - started, envelope.type);
+    }
+    await getAudit().emit(
+      {
+        action: 'brain.llm_call',
+        outcome: 'success',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        spanId: span.spanId,
+        parentSpanId: span.parentSpanId,
+        durationMs: Date.now() - started,
+        details: {
+          trigger: envelope.type,
+          brain: this.brain.constructor?.name ?? 'brain',
+          outputCount: outputs.length,
+          // Types and sizes only: never the text the brain produced.
+          outputs: outputs.slice(0, 20).map(summarizeOutput),
+        },
+      },
+      { tx: client }
+    );
+    return { outputs, span };
+  }
+
+  private async auditBrainFailure(
+    client: PoolClient,
+    scope: AuditScope,
+    error: BrainCallError,
+    cause: unknown
+  ): Promise<void> {
+    await getAudit().emit(
+      {
+        action: 'brain.error',
+        outcome: 'failure',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        spanId: error.span.spanId,
+        parentSpanId: error.span.parentSpanId,
+        errorCode: 'brain_failed',
+        errorMessage: cause instanceof Error ? cause.message : String(cause),
+        riskLevel: 'medium',
+        durationMs: error.durationMs,
+        details: { trigger: error.trigger },
+      },
+      { tx: client }
+    );
+  }
+
+  private async auditInvalidOutput(
+    client: PoolClient,
+    scope: AuditScope,
+    brainSpan: Span,
+    output: unknown,
+    errorCode = 'invalid_brain_output',
+    cause?: unknown
+  ): Promise<void> {
+    await getAudit().emit(
+      {
+        action: 'brain.error',
+        outcome: 'failure',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        parentSpanId: brainSpan.spanId,
+        errorCode,
+        ...(cause ? { errorMessage: cause instanceof Error ? cause.message : String(cause) } : {}),
+        riskLevel: 'medium',
+        details: { trigger: scope.commandType, output: summarizeOutput(output) },
+      },
+      { tx: client }
+    );
+  }
+
+  /** Audit one stored brain output: plan, clarify, tool call, decision. Replies/explanations are only in the brain.llm_call summary. */
+  private async auditBrainOutput(
+    client: PoolClient,
+    scope: AuditScope,
+    brainSpan: Span,
+    output: BrainOutput,
+    event: Event
+  ): Promise<void> {
+    const audit = getAudit();
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    const askId = typeof payload.askId === 'string' ? payload.askId : undefined;
+    const base = { userId: scope.userId, threadId: scope.threadId };
+    const tx = { tx: client };
+
+    switch (output.type) {
+      case 'clarify':
+        await audit.emit(
+          {
+            action: 'brain.clarify_requested',
+            outcome: 'success',
+            ...base,
+            parentSpanId: brainSpan.spanId,
+            target: askId ? { type: 'ask', id: askId } : undefined,
+            details: { askType: 'clarify', questionCount: output.questions.length },
+          },
+          tx
+        );
+        return;
+
+      case 'plan': {
+        const plan = startSpan(brainSpan.spanId);
+        await audit.emit(
+          {
+            action: 'brain.plan_created',
+            outcome: 'success',
+            ...base,
+            spanId: plan.spanId,
+            parentSpanId: plan.parentSpanId,
+            target: askId ? { type: 'ask', id: askId } : undefined,
+            details: { stepCount: output.steps.length, totalCost: output.totalCost ?? null },
+          },
+          tx
+        );
+        await audit.emit(
+          {
+            action: 'approval.requested',
+            outcome: 'success',
+            ...base,
+            parentSpanId: plan.spanId,
+            target: askId ? { type: 'ask', id: askId } : undefined,
+            riskLevel: 'medium',
+            details: { askType: 'plan_approval', blocking: true },
+          },
+          tx
+        );
+        return;
+      }
+
+      case 'tool_call': {
+        const tool = startSpan(brainSpan.spanId);
+        // The Hub does not execute tools: a tool call is the brain *proposing*
+        // one, and with needsApproval it waits for a human ('partial').
+        await audit.emit(
+          {
+            action: 'tool.called',
+            outcome: output.needsApproval ? 'partial' : 'success',
+            ...base,
+            spanId: tool.spanId,
+            parentSpanId: tool.parentSpanId,
+            target: { type: 'tool', id: output.tool },
+            riskLevel: output.risk,
+            details: {
+              tool: output.tool,
+              needsApproval: output.needsApproval,
+              executed: false,
+              // Names only: parameter values can hold ad copy, ids or credentials.
+              parameterKeys: Object.keys(output.parameters ?? {}).slice(0, 20),
+            },
+          },
+          tx
+        );
+        if (output.costImpact) {
+          // Informational: the Hub has no budget enforcement; the decision is the brain's.
+          await audit.emit(
+            {
+              action: 'policy.evaluated',
+              outcome: 'success',
+              ...base,
+              parentSpanId: tool.spanId,
+              target: { type: 'tool', id: output.tool },
+              riskLevel: output.risk,
+              details: {
+                policy: 'budget',
+                decision: output.needsApproval ? 'requires_approval' : 'allowed',
+                enforced: false,
+                decidedBy: 'brain',
+                currentCost: output.costImpact.current,
+                proposedCost: output.costImpact.proposed,
+                currency: 'USD',
+              },
+            },
+            tx
+          );
+        }
+        if (output.needsApproval) {
+          await audit.emit(
+            {
+              action: 'approval.requested',
+              outcome: 'success',
+              ...base,
+              parentSpanId: tool.spanId,
+              target: askId ? { type: 'ask', id: askId } : undefined,
+              riskLevel: output.risk,
+              details: { askType: 'action_approval', blocking: true, tool: output.tool },
+            },
+            tx
+          );
+        }
+        return;
+      }
+
+      case 'decision':
+        await audit.emit(
+          {
+            action: 'brain.decision_made',
+            outcome: 'success',
+            ...base,
+            parentSpanId: brainSpan.spanId,
+            target: { type: 'subject', id: String(output.target).slice(0, 128) },
+            riskLevel: output.decision === 'kill' ? 'high' : output.decision === 'change' ? 'medium' : 'low',
+            details: {
+              decision: output.decision,
+              confidence: output.confidence,
+              evidenceCount: output.evidence.length,
+            },
+          },
+          tx
+        );
+        return;
+
+      default:
+        return; // reply, explain
+    }
+  }
+
+  /** The user answered an ask: approvals are audited as approval.*, clarifications as an ask write. */
+  private async auditAskAnswered(
+    client: PoolClient,
+    scope: AuditScope,
+    payload: AnswerAskPayload,
+    askType: unknown
+  ): Promise<void> {
+    const audit = getAudit();
+    const type = typeof askType === 'string' ? askType : 'unknown';
+    const target = { type: 'ask', id: String(payload.askId).slice(0, 128) };
+    const base = { userId: scope.userId, threadId: scope.threadId, target };
+    if (type === 'plan_approval' || type === 'action_approval') {
+      const granted = payload.choice === 'approve';
+      await audit.emit(
+        {
+          action: granted ? 'approval.granted' : 'approval.rejected',
+          outcome: 'success',
+          ...base,
+          riskLevel: 'medium',
+          details: { askType: type, choice: String(payload.choice).slice(0, 64) },
+        },
+        { tx: client }
+      );
+      return;
+    }
+    await audit.emit(
+      {
+        action: 'data_access.write',
+        outcome: 'success',
+        ...base,
+        riskLevel: 'low',
+        details: { change: 'ask_answered', askType: type, answerCount: Object.keys(payload.values ?? {}).length },
+      },
+      { tx: client }
+    );
+  }
+
+  /** approve_plan: the user's decision on a plan (approval.granted / approval.rejected). */
+  private async auditPlanDecision(
+    client: PoolClient,
+    scope: AuditScope,
+    payload: Record<string, unknown>,
+    askResolved: boolean
+  ): Promise<void> {
+    const approved = payload.approved !== false;
+    await getAudit().emit(
+      {
+        action: approved ? 'approval.granted' : 'approval.rejected',
+        outcome: 'success',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        target: { type: 'plan', id: String(payload.planId ?? 'unknown').slice(0, 128) },
+        riskLevel: 'medium',
+        details: { askType: 'plan_approval', approved, askResolved },
+      },
+      { tx: client }
+    );
+  }
+
+  private async auditProcessed(
+    client: PoolClient,
+    scope: AuditScope,
+    startedAt: number,
+    events: Event[],
+    outcome: 'success' | 'failure',
+    errorCode?: string
+  ): Promise<void> {
+    await getAudit().emit(
+      {
+        action: 'command.processed',
+        outcome,
+        userId: scope.userId,
+        threadId: scope.threadId,
+        durationMs: Date.now() - startedAt,
+        ...(errorCode ? { errorCode } : {}),
+        details: { commandType: scope.commandType, eventCount: events.length },
+      },
+      { tx: client }
+    );
   }
 
   private async checkIdempotency(
@@ -521,7 +983,8 @@ export class CommandProcessor {
     userId: string,
     threadId: string,
     goal: GoalRow,
-    update: BrainGoalUpdate
+    update: BrainGoalUpdate,
+    change: 'created' | 'updated'
   ): Promise<Event> {
     const knownStatuses: GoalStatus[] = ['active', 'paused', 'completed', 'cancelled'];
     const status: GoalStatus =
@@ -584,6 +1047,50 @@ export class CommandProcessor {
     );
     const event = eventResult.rows[0];
     await this.addToOutbox(client, userId, event.id);
+
+    // Goal state change (the protocol has no goal category: a write to the goal record).
+    const audit = getAudit();
+    const write = await audit.emit(
+      {
+        action: 'data_access.write',
+        outcome: 'success',
+        userId,
+        threadId,
+        goalId: goal.id,
+        target: { type: 'goal', id: goal.id },
+        riskLevel: 'low',
+        details: {
+          change,
+          status,
+          ...(change === 'updated' ? { previousStatus: goal.status } : {}),
+          progressPercent: percent,
+        },
+      },
+      { tx: client }
+    );
+    if (change === 'created' && goal.budget) {
+      // Informational: the Hub records the budget but does not enforce it yet.
+      await audit.emit(
+        {
+          action: 'policy.evaluated',
+          outcome: 'success',
+          userId,
+          threadId,
+          goalId: goal.id,
+          target: { type: 'goal', id: goal.id },
+          parentSpanId: write?.spanId,
+          details: {
+            policy: 'budget',
+            decision: 'recorded',
+            enforced: false,
+            dailyBudget: goal.budget.daily ?? null,
+            totalBudget: goal.budget.total ?? null,
+            currency: goal.budget.currency ?? 'USD',
+          },
+        },
+        { tx: client }
+      );
+    }
     return event;
   }
 
@@ -640,7 +1147,8 @@ export class CommandProcessor {
     client: PoolClient,
     userId: string,
     command: Command,
-    envelope: CommandEnvelope
+    envelope: CommandEnvelope,
+    startedAt: number
   ): Promise<{ command: Command; events: Event[] }> {
     const payload = envelope.payload as ControlPayload;
     
@@ -670,6 +1178,25 @@ export class CommandProcessor {
       'UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2',
       ['processed', command.id]
     );
+
+    // Pause / resume / emergency stop. The protocol has no control category, so
+    // the change of execution state is a config.changed event. NOTE: today this
+    // only emits a status event; the mock brain does not actually stop.
+    const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
+    await getAudit().emit(
+      {
+        action: 'config.changed',
+        outcome: 'success',
+        userId,
+        threadId: envelope.threadId,
+        target: { type: 'execution_state', id: envelope.threadId ?? userId },
+        riskLevel: payload.action === 'kill' ? 'high' : payload.action === 'pause' ? 'medium' : 'low',
+        tags: payload.action === 'kill' ? ['emergency_stop'] : [payload.action],
+        details: { control: payload.action, scope: envelope.threadId ? 'thread' : 'all' },
+      },
+      { tx: client }
+    );
+    await this.auditProcessed(client, scope, startedAt, [event], 'success');
 
     return { command, events: [event] };
   }

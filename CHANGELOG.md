@@ -9,11 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Audit trail: every action emits a protocol v0.2.0 `AuditEvent` through a transactional
+  outbox (`audit_outbox`, migration 004) and a relay to the `proba.audit.events` Redis Stream
+  (`AUDIT_ENABLED`, `AUDIT_RELAY_ENABLED`, `AUDIT_STREAM`, `AUDIT_WORKSPACE_ID`). One traceId per
+  request (`clientMsgId` for commands), on every log line and in the `X-Trace-Id` response header.
+  See README "Audit trail".
+
 - Sign-in with Firebase Authentication: `POST /v1/auth/session` verifies a
   Firebase ID token against Google's public keys (no service account) and
   exchanges it for a revocable Hub session token. Configure `FIREBASE_PROJECT_ID`.
 - Users are upserted by Firebase uid (migration `003_firebase_auth`: `firebase_uid`,
   `email_verified`, `last_sign_in_at`); optional `AUTH_ALLOWED_EMAIL_DOMAINS`.
+
+### Fixed
+
+- The Hub reads `JWT_SECRET_FILE` (Docker/Swarm secret), which takes precedence over
+  `JWT_SECRET`; it now refuses to start in production without a secret or with the
+  development default (the Swarm stack already set `JWT_SECRET_FILE`, which was ignored).
+- The production image can run migrations: `npm run build` copies the `.sql` files into
+  `dist/`, `node dist/db/migrate-cli.js` (`npm run migrate:prod`) needs no tsx, and
+  compose/stack have a one-shot `migrate` service. Runners are serialized by an advisory lock.
 
 ### Removed
 
@@ -24,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Pinned `@smallseedlabs/proba-protocol` to the `v0.1.2` release tag (same commit `c643d52`).
+- The default workspace is now `seedbed` ("Seedbed"); it was `default` ("My workspace").
+  Request logging is one `request completed` line per request (with `traceId`).
+
+- Pinned `@smallseedlabs/proba-protocol` to the `v0.2.0` release tag (`5444c34`; was `v0.1.2`). Additive: adds the `/audit` subpath.
 
 ### Fixed
 

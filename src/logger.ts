@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { config } from './config.js';
+import { traceMixin } from './audit/trace.js';
 
 const SECRET_QUERY_PARAMS = /([?&](?:token|access_token)=)[^&#]*/gi;
 
@@ -28,6 +29,9 @@ export const logger = pino({
         },
       }
     : undefined,
+  // Adds the request's traceId to EVERY line logged inside a request or job
+  // (child loggers inherit the mixin). Lines outside any trace (startup) have none.
+  mixin: traceMixin,
   serializers: {
     // Overrides Fastify's default request serializer (same fields, redacted URL).
     req: (req: LoggedRequest) => ({
