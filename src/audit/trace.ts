@@ -96,3 +96,9 @@ export function runInSpan<T>(span: Span, fn: () => T): T {
   if (!ctx) return fn();
   return storage.run({ ...ctx, spanId: span.spanId }, fn);
 }
+
+/** pino mixin: `{ traceId }` for every log line written inside a request or job. */
+export function traceMixin(): { traceId?: string } {
+  const trace = storage.getStore();
+  return trace ? { traceId: trace.traceId } : {};
+}
