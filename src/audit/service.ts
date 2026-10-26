@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
   AUDIT_ACTION_INFO,
+  buildAuditContent,
   type AuditActionName as CatalogActionName,
   type AuditCategory,
 } from '@smallseedlabs/proba-protocol/audit';
@@ -21,7 +22,7 @@ import {
   type OutboxStore,
   type PgQueryable,
 } from './vendor/proba-audit/index.js';
-import { redactDetails, redactString } from './redact.js';
+import { maskSecretsInText, redactDetails, redactString } from './redact.js';
 import { currentTrace } from './trace.js';
 import { systemClock, systemIds, toAuditLogger } from './runtime.js';
 
@@ -49,6 +50,9 @@ const SPECIFIC_ACTIONS = new Set<string>(
   (Object.keys(AUDIT_ACTION_INFO) as CatalogActionName[]).filter((a) => AUDIT_ACTION_INFO[a].status === 'specific')
 );
 
+/** Kinds of raw text the Hub sets (a subset of AUDIT_CONTENT_KINDS). */
+export type AuditContentKind = 'user_message' | 'brain_reply' | 'brain_clarification' | 'explanation';
+
 export interface HubAuditDraft {
   /** Specific action from the catalog. Category and default risk come from AUDIT_ACTION_INFO. */
   action: AuditActionName;
@@ -67,6 +71,12 @@ export interface HubAuditDraft {
   durationMs?: number;
   details?: Record<string, unknown>;
   tags?: string[];
+  /**
+   * Raw text behind the event (a message, a reply, an explanation). Only written when
+   * AUDIT_CONTENT_ENABLED is on: secrets are masked, long text is truncated and flagged
+   * (AuditEvent.content). `details` keeps the length either way.
+   */
+  content?: { kind: AuditContentKind; text: string };
   /**
    * Use the request's root span as this event's span (and no parent). Exactly one
    * event per request should do this: the first thing the request audits.
@@ -108,6 +118,8 @@ export interface HubAudit {
 export interface HubAuditDeps {
   outbox: OutboxStore<PgQueryable>;
   enabled?: boolean;
+  /** Write AuditEvent.content (default: config.audit.contentEnabled). */
+  contentEnabled?: boolean;
   service?: string;
   defaultWorkspaceId?: string;
   clock?: Clock;
@@ -117,6 +129,7 @@ export interface HubAuditDeps {
 
 export function createHubAudit(deps: HubAuditDeps): HubAudit {
   const enabled = deps.enabled ?? config.audit.enabled;
+  const contentEnabled = deps.contentEnabled ?? config.audit.contentEnabled;
   const log = deps.logger ?? toAuditLogger(logger);
   const emitter: AuditEmitter = createOutboxAuditEmitter<PgQueryable>({
     outbox: deps.outbox,
@@ -173,6 +186,12 @@ export function createHubAudit(deps: HubAuditDeps): HubAudit {
             ...(draft.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(draft.durationMs)) } : {}),
             ...(draft.tags?.length ? { tags: draft.tags } : {}),
             details: redactDetails(details),
+            ...(contentEnabled && draft.content && draft.content.text.length > 0
+              ? (() => {
+                  const masked = maskSecretsInText(draft.content.text);
+                  return { content: buildAuditContent(draft.content.kind, masked.text, { redactions: masked.redactions }) };
+                })()
+              : {}),
             ...(ctx ? { traceId: ctx.traceId } : {}),
             ...(draft.spanId
               ? { spanId: draft.spanId }

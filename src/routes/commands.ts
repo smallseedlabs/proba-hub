@@ -186,7 +186,8 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
           );
         }
         if (accepted.type === 'send_message') {
-          // The user's message joins the thread. Length only, never the text.
+          // The user's message joins the thread. `details` has the length only; the text itself
+          // goes in `content` (secrets masked) when AUDIT_CONTENT_ENABLED is on.
           const text = (accepted.payload as { text?: unknown }).text;
           await audit.emit(
             {
@@ -197,6 +198,7 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
               target: accepted.threadId ? { type: 'thread', id: accepted.threadId } : undefined,
               parentSpanId: received?.spanId,
               details: { clientMsgId: accepted.clientMsgId, textLength: typeof text === 'string' ? text.length : 0 },
+              ...(typeof text === 'string' ? { content: { kind: 'user_message' as const, text } } : {}),
             },
             { tx: client }
           );

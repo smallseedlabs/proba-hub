@@ -91,7 +91,7 @@ Key variables:
 - `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
 - `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
-- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`): see [Audit trail](#audit-trail)
+- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events, secrets masked): see [Audit trail](#audit-trail)
 
 ### Running with Docker Compose
 
@@ -459,8 +459,19 @@ Hub action ──same DB transaction──> audit_outbox ──AuditRelay──>
   the protocol is unchanged and the traceId is not added to SSE events.
 - **No secrets, no PII.** `details` pass through a redactor (`src/audit/redact.ts`): secret-named keys,
   personal keys (email, phone, ip, ...), bearer tokens, JWTs and email-shaped strings are removed or
-  masked and size is bounded. Callers record ids and sizes, never message text, brain output text, tool
+  masked and size is bounded. Callers record ids and sizes in `details`, never message text, brain output text, tool
   parameter values, tokens or addresses.
+- **Raw text, opt-in (`AUDIT_CONTENT_ENABLED`, default `false`).** When on, four events also carry the
+  text itself in the protocol's `content` field (protocol 0.3.3): `thread.message_received` (`user_message`),
+  `brain.reply_generated` (`brain_reply`), `brain.explanation_generated` (`explanation`) and
+  `brain.clarification_requested` (`brain_clarification`: the reason and the numbered questions). It is written in the same
+  transaction and outbox row as the event; `details.textLength` stays. The text goes through
+  `maskSecretsInText` (`src/audit/redact.ts`), a "secrets only" mode: passwords, tokens (bearer, JWT, labelled, query
+  parameters), API keys (Stripe/OpenAI-style, GitHub, Slack, Google, AWS prefixes), private key blocks and Luhn-valid card
+  numbers are replaced with `[REDACTED...]` and counted in `content.redactions`; names, emails, numbers and plans stay as
+  written. Text over 16 384 characters is truncated and flagged (`truncated`, `originalLength`). A word that merely looks
+  like a secret may be masked (better than keeping a real one). Turn it on only where the audit store's access rules
+  (proba-audit: admin role only) fit the conversation's sensitivity.
 
 ### Events emitted
 
