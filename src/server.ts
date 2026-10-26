@@ -82,7 +82,6 @@ export async function createServer(): Promise<FastifyInstance> {
         target: { type: 'route', id: `${request.method} ${request.routeOptions?.url ?? 'unknown'}` },
         errorCode: error.code ?? 'unhandled_error',
         errorMessage: error.message,
-        riskLevel: 'medium',
         details: { component: 'http', statusCode: error.statusCode ?? 500 },
       },
       { bestEffort: true }

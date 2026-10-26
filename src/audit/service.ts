@@ -3,7 +3,11 @@ import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
-  AUDIT_ACTIONS,
+  AUDIT_ACTION_INFO,
+  type AuditActionName as CatalogActionName,
+  type AuditCategory,
+} from '@smallseedlabs/proba-protocol/audit';
+import {
   AuditValidationError,
   PostgresOutboxStore,
   createOutboxAuditEmitter,
@@ -21,14 +25,32 @@ import { redactDetails, redactString } from './redact.js';
 import { currentTrace } from './trace.js';
 import { systemClock, systemIds, toAuditLogger } from './runtime.js';
 
-/** Every action name the protocol lists in AUDIT_ACTIONS. The Hub never invents its own. */
-export type AuditActionName = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS][number];
-export type AuditCategoryName = keyof typeof AUDIT_ACTIONS;
+/** Catalog actions that are `generic` or `alias` in v0.3.1. The Hub never emits them (a unit test keeps this list equal to the catalog). */
+export type DeprecatedAuditAction =
+  | 'brain.clarify_requested'
+  | 'tool.called'
+  | 'tool.completed'
+  | 'policy.evaluated'
+  | 'policy.denied'
+  | 'data_access.read'
+  | 'data_access.write'
+  | 'memory.read'
+  | 'memory.write'
+  | 'metrics.observation_stored'
+  | 'config.changed';
 
-const ALL_ACTIONS = new Set<string>(Object.values(AUDIT_ACTIONS).flat());
+/** Every specific action name in the protocol catalog (AUDIT_ACTION_INFO). The Hub never invents its own, and never uses a generic or alias name. */
+export type AuditActionName = Exclude<CatalogActionName, DeprecatedAuditAction>;
+/** The coarse `category` field of an event. It is NOT the action prefix: it comes from AUDIT_ACTION_INFO. */
+export type AuditCategoryName = AuditCategory;
+
+/** Catalog actions the Hub may emit: those whose status is `specific`. */
+const SPECIFIC_ACTIONS = new Set<string>(
+  (Object.keys(AUDIT_ACTION_INFO) as CatalogActionName[]).filter((a) => AUDIT_ACTION_INFO[a].status === 'specific')
+);
 
 export interface HubAuditDraft {
-  /** Dotted action from AUDIT_ACTIONS. The category is its prefix. */
+  /** Specific action from the catalog. Category and default risk come from AUDIT_ACTION_INFO. */
   action: AuditActionName;
   outcome: AuditEvent['outcome'];
   /** Defaults to the authenticated user, else the Hub itself (system). */
@@ -110,12 +132,22 @@ export function createHubAudit(deps: HubAuditDeps): HubAudit {
     enabled,
     async emit(draft, options = {}) {
       if (!enabled) return null;
-      if (!ALL_ACTIONS.has(draft.action)) {
-        log.error('audit event with an action that is not in AUDIT_ACTIONS', { action: draft.action });
+      const info = AUDIT_ACTION_INFO[draft.action as CatalogActionName] as
+        | (typeof AUDIT_ACTION_INFO)[CatalogActionName]
+        | undefined;
+      if (!info) {
+        log.error('audit event with an action that is not in AUDIT_ACTION_INFO', { action: draft.action });
+        return null;
+      }
+      if (!SPECIFIC_ACTIONS.has(draft.action)) {
+        log.error('audit event with a generic or alias action; use the preferred one', {
+          action: draft.action,
+          preferred: info.preferred,
+        });
         return null;
       }
       const ctx = currentTrace();
-      const category = draft.action.slice(0, draft.action.indexOf('.')) as AuditCategoryName;
+      const category: AuditCategoryName = info.category;
       const userId = draft.userId ?? ctx?.userId;
       const details: Record<string, unknown> = { ...(draft.details ?? {}) };
       // A client message id that could not become the traceId is kept for correlation.
@@ -136,7 +168,7 @@ export function createHubAudit(deps: HubAuditDeps): HubAudit {
             ...(draft.target ? { target: draft.target } : {}),
             ...(draft.errorCode ? { errorCode: draft.errorCode } : {}),
             ...(draft.errorMessage ? { errorMessage: redactString(draft.errorMessage) } : {}),
-            ...(draft.riskLevel ? { riskLevel: draft.riskLevel } : {}),
+            riskLevel: draft.riskLevel ?? info.riskLevel,
             ...(draft.cost ? { cost: draft.cost } : {}),
             ...(draft.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(draft.durationMs)) } : {}),
             ...(draft.tags?.length ? { tags: draft.tags } : {}),

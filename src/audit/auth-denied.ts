@@ -23,7 +23,6 @@ export async function auditAuthDenied(request: FastifyRequest, reason: AuthDenie
       actor: { type: 'system', id: 'anonymous' },
       target: { type: 'route', id: `${request.method} ${request.routeOptions?.url ?? 'unknown'}` },
       errorCode: reason,
-      riskLevel: 'medium',
       details: { reason, ...(suppressed > 0 ? { suppressedSinceLast: suppressed } : {}) },
     },
     { bestEffort: true }

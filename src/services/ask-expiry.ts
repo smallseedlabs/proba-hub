@@ -28,7 +28,6 @@ export function startAskExpiryJob(): void {
             actor: { type: 'system', id: 'ask-expiry' },
             errorCode: 'ask_expiry_failed',
             errorMessage: error instanceof Error ? error.message : String(error),
-            riskLevel: 'medium',
             details: { component: 'ask_expiry' },
           },
           { bestEffort: true }
@@ -153,7 +152,6 @@ async function handleExpiredAsk(
         userId,
         threadId,
         target: { type: 'ask', id: askId },
-        riskLevel: 'low',
         details: { onExpire, resolution },
       },
       { tx: client }

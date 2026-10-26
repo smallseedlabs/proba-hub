@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Audit actions are now the specific names of the protocol v0.3.1 catalog: `goal.created|updated|
+  status_changed|clarification_answered|budget_proposed|budget_approved|budget_declined`, `budget.evaluated`,
+  `stream.connected|disconnected`, `control.paused|resumed|emergency_stopped` (the `kill` command),
+  `thread.created|message_received|access_denied`, `tool.proposed`, `brain.reply_generated|
+  explanation_generated|clarification_requested`. They replace `data_access.read|write`,
+  `policy.evaluated|denied`, `config.changed`, `tool.called` and `brain.clarify_requested`, which are
+  never emitted any more. The event `category` and default `riskLevel` come from `AUDIT_ACTION_INFO`
+  (not the action prefix). Anything querying the old names in ClickHouse must follow.
+- `@smallseedlabs/proba-protocol` is pinned to `v0.3.1` (was `v0.2.0`).
+
 ### Added
+
+- Unit test that scans the code's audit actions against `AUDIT_ACTION_INFO` and fails on any
+  `generic` or `alias` action; `HubAudit.emit` refuses them at runtime.
 
 - Audit trail: every action emits a protocol v0.2.0 `AuditEvent` through a transactional
   outbox (`audit_outbox`, migration 004) and a relay to the `proba.audit.events` Redis Stream

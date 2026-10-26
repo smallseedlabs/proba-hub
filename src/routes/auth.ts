@@ -175,7 +175,6 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
             actor: { type: 'system', id: 'anonymous' },
             target: { type: 'route', id: 'POST /v1/auth/session' },
             errorCode: error.code,
-            riskLevel: 'medium',
             details: { method: 'firebase' },
           });
           return reply.code(401).send({
@@ -196,7 +195,6 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
             actor: { type: 'system', id: 'anonymous' },
             target: { type: 'route', id: 'POST /v1/auth/session' },
             errorCode: error.code,
-            riskLevel: 'medium',
             details: { method: 'firebase' },
           });
           return reply.code(RESOLUTION_STATUS[error.code]).send({ error: error.code, message: error.message });

@@ -42,6 +42,13 @@ export class BrainCallError extends Error {
   }
 }
 
+/** Control command -> audit action. `kill` is control.emergency_stopped (decided with the protocol v0.3.1 catalog). */
+const CONTROL_AUDIT_ACTIONS: Record<string, 'control.paused' | 'control.resumed' | 'control.emergency_stopped'> = {
+  pause: 'control.paused',
+  resume: 'control.resumed',
+  kill: 'control.emergency_stopped',
+};
+
 interface AuditScope {
   userId: string;
   threadId?: string;
@@ -55,6 +62,8 @@ function summarizeOutput(output: unknown): Record<string, unknown> {
   switch (type) {
     case 'reply':
       return { type, textLength: typeof o.text === 'string' ? o.text.length : 0 };
+    case 'explain':
+      return { type, textLength: typeof o.explanation === 'string' ? o.explanation.length : 0 };
     case 'tool_call':
       return { type, tool: typeof o.tool === 'string' ? o.tool.slice(0, 64) : 'unknown' };
     case 'plan':
@@ -103,7 +112,6 @@ export class CommandProcessor {
             parentSpanId: error.span.parentSpanId,
             errorCode: 'brain_failed',
             errorMessage: message,
-            riskLevel: 'medium',
             durationMs: error.durationMs,
             details: { trigger: error.trigger },
           },
@@ -131,7 +139,6 @@ export class CommandProcessor {
           threadId: envelope.threadId,
           errorCode: 'command_processing_failed',
           errorMessage: message,
-          riskLevel: 'medium',
           details: { component: 'command_processor', commandType: scope.commandType },
         },
         { bestEffort: true }
@@ -447,7 +454,6 @@ export class CommandProcessor {
         parentSpanId: error.span.parentSpanId,
         errorCode: 'brain_failed',
         errorMessage: cause instanceof Error ? cause.message : String(cause),
-        riskLevel: 'medium',
         durationMs: error.durationMs,
         details: { trigger: error.trigger },
       },
@@ -472,14 +478,13 @@ export class CommandProcessor {
         parentSpanId: brainSpan.spanId,
         errorCode,
         ...(cause ? { errorMessage: cause instanceof Error ? cause.message : String(cause) } : {}),
-        riskLevel: 'medium',
         details: { trigger: scope.commandType, output: summarizeOutput(output) },
       },
       { tx: client }
     );
   }
 
-  /** Audit one stored brain output: plan, clarify, tool call, decision. Replies/explanations are only in the brain.llm_call summary. */
+  /** Audit one stored brain output: reply, explanation, clarification, plan, tool proposal, decision (the invocation itself is brain.llm_call). */
   private async auditBrainOutput(
     client: PoolClient,
     scope: AuditScope,
@@ -494,10 +499,38 @@ export class CommandProcessor {
     const tx = { tx: client };
 
     switch (output.type) {
+      case 'reply':
+        await audit.emit(
+          {
+            action: 'brain.reply_generated',
+            outcome: 'success',
+            ...base,
+            parentSpanId: brainSpan.spanId,
+            // Length only, never the text.
+            details: { textLength: output.text.length },
+          },
+          tx
+        );
+        return;
+
+      case 'explain':
+        await audit.emit(
+          {
+            action: 'brain.explanation_generated',
+            outcome: 'success',
+            ...base,
+            parentSpanId: brainSpan.spanId,
+            target: { type: 'subject', id: String(output.target).slice(0, 128) },
+            details: { textLength: output.explanation.length },
+          },
+          tx
+        );
+        return;
+
       case 'clarify':
         await audit.emit(
           {
-            action: 'brain.clarify_requested',
+            action: 'brain.clarification_requested',
             outcome: 'success',
             ...base,
             parentSpanId: brainSpan.spanId,
@@ -529,7 +562,6 @@ export class CommandProcessor {
             ...base,
             parentSpanId: plan.spanId,
             target: askId ? { type: 'ask', id: askId } : undefined,
-            riskLevel: 'medium',
             details: { askType: 'plan_approval', blocking: true },
           },
           tx
@@ -543,7 +575,7 @@ export class CommandProcessor {
         // one, and with needsApproval it waits for a human ('partial').
         await audit.emit(
           {
-            action: 'tool.called',
+            action: 'tool.proposed',
             outcome: output.needsApproval ? 'partial' : 'success',
             ...base,
             spanId: tool.spanId,
@@ -564,19 +596,18 @@ export class CommandProcessor {
           // Informational: the Hub has no budget enforcement; the decision is the brain's.
           await audit.emit(
             {
-              action: 'policy.evaluated',
+              action: 'budget.evaluated',
               outcome: 'success',
               ...base,
               parentSpanId: tool.spanId,
               target: { type: 'tool', id: output.tool },
-              riskLevel: output.risk,
               details: {
-                policy: 'budget',
                 decision: output.needsApproval ? 'requires_approval' : 'allowed',
                 enforced: false,
                 decidedBy: 'brain',
-                currentCost: output.costImpact.current,
-                proposedCost: output.costImpact.proposed,
+                limit: null,
+                spent: output.costImpact.current,
+                proposed: output.costImpact.proposed,
                 currency: 'USD',
               },
             },
@@ -619,12 +650,64 @@ export class CommandProcessor {
         );
         return;
 
-      default:
-        return; // reply, explain
     }
   }
 
-  /** The user answered an ask: approvals are audited as approval.*, clarifications as an ask write. */
+  /** The goal a thread is about (the latest one), if any, and whether an ask carried a cost effect (a budget decision). */
+  private async goalAndCostOf(
+    client: PoolClient,
+    threadId: string | undefined,
+    askId: string | undefined
+  ): Promise<{ goalId?: string; costEffect?: { current?: unknown; proposed?: unknown; currency?: unknown } }> {
+    if (!threadId) return {};
+    const goal = await client.query<{ id: string }>(
+      'SELECT id FROM goals WHERE thread_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [threadId]
+    );
+    let costEffect: { current?: unknown; proposed?: unknown; currency?: unknown } | undefined;
+    if (askId && UUID_RE.test(askId)) {
+      const ask = await client.query<{ costEffect: Record<string, unknown> | null }>(
+        'SELECT cost_effect as "costEffect" FROM asks WHERE id = $1 AND thread_id = $2',
+        [askId, threadId]
+      );
+      costEffect = ask.rows[0]?.costEffect ?? undefined;
+    }
+    return { goalId: goal.rows[0]?.id, costEffect };
+  }
+
+  /** Audit a budget decision (goal.budget_approved / goal.budget_declined) next to the approval.* event when the ask carried a cost effect. */
+  private async auditBudgetDecision(
+    client: PoolClient,
+    scope: AuditScope,
+    askId: string,
+    approved: boolean,
+    askType: string,
+    parentSpanId?: string
+  ): Promise<void> {
+    const { goalId, costEffect } = await this.goalAndCostOf(client, scope.threadId, askId);
+    if (!costEffect) return;
+    await getAudit().emit(
+      {
+        action: approved ? 'goal.budget_approved' : 'goal.budget_declined',
+        outcome: 'success',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        ...(goalId ? { goalId } : {}),
+        target: { type: 'ask', id: askId.slice(0, 128) },
+        parentSpanId,
+        details: {
+          askType,
+          enforced: false,
+          currentCost: typeof costEffect.current === 'number' ? costEffect.current : null,
+          proposedCost: typeof costEffect.proposed === 'number' ? costEffect.proposed : null,
+          currency: typeof costEffect.currency === 'string' ? costEffect.currency.slice(0, 8) : null,
+        },
+      },
+      { tx: client }
+    );
+  }
+
+  /** The user answered an ask: approvals are audited as approval.* (plus goal.budget_* when it carried a cost), clarifications as goal.clarification_answered. */
   private async auditAskAnswered(
     client: PoolClient,
     scope: AuditScope,
@@ -637,25 +720,26 @@ export class CommandProcessor {
     const base = { userId: scope.userId, threadId: scope.threadId, target };
     if (type === 'plan_approval' || type === 'action_approval') {
       const granted = payload.choice === 'approve';
-      await audit.emit(
+      const decision = await audit.emit(
         {
           action: granted ? 'approval.granted' : 'approval.rejected',
           outcome: 'success',
           ...base,
-          riskLevel: 'medium',
           details: { askType: type, choice: String(payload.choice).slice(0, 64) },
         },
         { tx: client }
       );
+      await this.auditBudgetDecision(client, scope, String(payload.askId), granted, type, decision?.spanId);
       return;
     }
+    const { goalId } = await this.goalAndCostOf(client, scope.threadId, undefined);
     await audit.emit(
       {
-        action: 'data_access.write',
+        action: 'goal.clarification_answered',
         outcome: 'success',
         ...base,
-        riskLevel: 'low',
-        details: { change: 'ask_answered', askType: type, answerCount: Object.keys(payload.values ?? {}).length },
+        ...(goalId ? { goalId } : {}),
+        details: { askType: type, answerCount: Object.keys(payload.values ?? {}).length },
       },
       { tx: client }
     );
@@ -669,18 +753,20 @@ export class CommandProcessor {
     askResolved: boolean
   ): Promise<void> {
     const approved = payload.approved !== false;
-    await getAudit().emit(
+    const decision = await getAudit().emit(
       {
         action: approved ? 'approval.granted' : 'approval.rejected',
         outcome: 'success',
         userId: scope.userId,
         threadId: scope.threadId,
         target: { type: 'plan', id: String(payload.planId ?? 'unknown').slice(0, 128) },
-        riskLevel: 'medium',
         details: { askType: 'plan_approval', approved, askResolved },
       },
       { tx: client }
     );
+    if (typeof payload.planId === 'string') {
+      await this.auditBudgetDecision(client, scope, payload.planId, approved, 'plan_approval', decision?.spanId);
+    }
   }
 
   private async auditProcessed(
@@ -1048,31 +1134,45 @@ export class CommandProcessor {
     const event = eventResult.rows[0];
     await this.addToOutbox(client, userId, event.id);
 
-    // Goal state change (the protocol has no goal category: a write to the goal record).
+    // Goal state change: goal.created / goal.updated (+ goal.status_changed when the lifecycle status moved).
     const audit = getAudit();
+    const previousStatus = change === 'updated' ? goal.status : undefined;
+    const changedFields = (['status', 'progress', 'metrics'] as const).filter((k) => update[k] !== undefined);
     const write = await audit.emit(
       {
-        action: 'data_access.write',
+        action: change === 'created' ? 'goal.created' : 'goal.updated',
         outcome: 'success',
         userId,
         threadId,
         goalId: goal.id,
         target: { type: 'goal', id: goal.id },
-        riskLevel: 'low',
-        details: {
-          change,
-          status,
-          ...(change === 'updated' ? { previousStatus: goal.status } : {}),
-          progressPercent: percent,
-        },
+        details:
+          change === 'created'
+            ? { status, hasBudget: goal.budget !== null, progressPercent: percent }
+            : { changedFields, progressPercent: percent },
       },
       { tx: client }
     );
-    if (change === 'created' && goal.budget) {
-      // Informational: the Hub records the budget but does not enforce it yet.
+    if (change === 'updated' && previousStatus !== undefined && previousStatus !== status) {
       await audit.emit(
         {
-          action: 'policy.evaluated',
+          action: 'goal.status_changed',
+          outcome: 'success',
+          userId,
+          threadId,
+          goalId: goal.id,
+          target: { type: 'goal', id: goal.id },
+          parentSpanId: write?.spanId,
+          details: { from: previousStatus, to: status },
+        },
+        { tx: client }
+      );
+    }
+    if (change === 'created' && goal.budget) {
+      // The user proposed a budget with the goal. The Hub records it but does not enforce it yet.
+      await audit.emit(
+        {
+          action: 'goal.budget_proposed',
           outcome: 'success',
           userId,
           threadId,
@@ -1080,8 +1180,7 @@ export class CommandProcessor {
           target: { type: 'goal', id: goal.id },
           parentSpanId: write?.spanId,
           details: {
-            policy: 'budget',
-            decision: 'recorded',
+            proposedBy: 'user',
             enforced: false,
             dailyBudget: goal.budget.daily ?? null,
             totalBudget: goal.budget.total ?? null,
@@ -1179,23 +1278,25 @@ export class CommandProcessor {
       ['processed', command.id]
     );
 
-    // Pause / resume / emergency stop. The protocol has no control category, so
-    // the change of execution state is a config.changed event. NOTE: today this
-    // only emits a status event; the mock brain does not actually stop.
+    // Pause / resume / emergency stop. The Hub's `kill` command stops everything in
+    // its scope, so it is control.emergency_stopped (control.killed is for one goal/run).
+    // NOTE: today this only emits a status event; the mock brain does not actually stop.
     const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
-    await getAudit().emit(
-      {
-        action: 'config.changed',
-        outcome: 'success',
-        userId,
-        threadId: envelope.threadId,
-        target: { type: 'execution_state', id: envelope.threadId ?? userId },
-        riskLevel: payload.action === 'kill' ? 'high' : payload.action === 'pause' ? 'medium' : 'low',
-        tags: payload.action === 'kill' ? ['emergency_stop'] : [payload.action],
-        details: { control: payload.action, scope: envelope.threadId ? 'thread' : 'all' },
-      },
-      { tx: client }
-    );
+    const controlAction = CONTROL_AUDIT_ACTIONS[payload.action];
+    if (controlAction) {
+      await getAudit().emit(
+        {
+          action: controlAction,
+          outcome: 'success',
+          userId,
+          threadId: envelope.threadId,
+          target: { type: 'execution_state', id: envelope.threadId ?? userId },
+          tags: payload.action === 'kill' ? ['emergency_stop'] : [payload.action],
+          details: { control: payload.action, scope: envelope.threadId ? 'thread' : 'workspace' },
+        },
+        { tx: client }
+      );
+    }
     await this.auditProcessed(client, scope, startedAt, [event], 'success');
 
     return { command, events: [event] };

@@ -18,3 +18,12 @@ metrics schemas; the command/event/brain contract is unchanged):
 ```json
 "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.2.0"
 ```
+
+It is now pinned to v0.3.1 (`5c20d28`: the audit action catalog `AUDIT_ACTION_INFO` with a
+recommended category and default risk per action, the `control.*`, `stream.*`, `thread.*`, `goal.*`,
+`budget.*` and `campaign.*` actions, and `generic` / `alias` markers on the v0.2.0 names). The Hub emits
+only `specific` actions:
+
+```json
+"@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.3.1"
+```

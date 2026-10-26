@@ -428,7 +428,7 @@ an initial `goal_updated`.
 
 ## Audit trail
 
-The Hub emits a protocol v0.2.0 `AuditEvent` (`@smallseedlabs/proba-protocol/audit`) for every
+The Hub emits a protocol v0.3.1 `AuditEvent` (`@smallseedlabs/proba-protocol/audit`) for every
 action, through a transactional outbox, to the audit pipeline of
 [proba-audit](https://github.com/smallseedlabs/proba-audit):
 
@@ -464,7 +464,15 @@ Hub action ──same DB transaction──> audit_outbox ──AuditRelay──>
 
 ### Events emitted
 
-| Action | Category | When |
+Every action is a **specific** name from the protocol v0.3.1 catalog (`AUDIT_ACTION_INFO`). The
+`category` field and the default `riskLevel` come from that catalog, not from the action prefix
+(`goal.created` is `data_access`, `control.paused` is `config`); a producer only overrides the risk when
+the data carries one (a tool's own risk, a brain decision). The generic and alias names
+(`data_access.read|write`, `policy.evaluated|denied`, `config.changed`, `tool.called`,
+`brain.clarify_requested`, ...) are never emitted: `HubAudit.emit` refuses them and a unit test
+(`src/audit/emitted-actions.test.ts`) fails if the code mentions one.
+
+| Action | Category (default risk) | When |
 | --- | --- | --- |
 | `auth.sign_in` | auth | Firebase sign-in succeeded (`/v1/auth/session`), or `/dev/login` |
 | `auth.session_issued` | auth | Session row created (child of `auth.sign_in`) |
@@ -476,24 +484,34 @@ Hub action ──same DB transaction──> audit_outbox ──AuditRelay──>
 | `command.rejected` | command | Envelope/payload validation failed (`failure`) or thread not owned (`denied`) |
 | `command.processed` | command | Processing finished (`success`) or failed (`failure`, also when the processing transaction rolled back) |
 | `command.duplicate` | command | Same `clientMsgId` replayed (idempotent) |
-| `brain.llm_call` | brain | Brain invoked; details hold output types and sizes (never text) |
-| `brain.clarify_requested` / `brain.plan_created` / `brain.decision_made` | brain | Brain output of that kind (child of the brain span) |
-| `brain.error` | brain | Brain threw, or returned an invalid output / one that could not be stored |
-| `tool.called` | tool | Brain proposed a tool call (`partial` while it needs approval; the Hub executes no tools; parameter names only) |
-| `approval.requested` | approval | Plan or tool call waiting for approval |
-| `approval.granted` / `approval.rejected` | approval | `approve_plan`, or `answer_ask` on a plan/action approval |
-| `approval.expired` | approval | Ask expired (job run) |
-| `data_access.write` | data_access | Goal created/updated (`details.change`), clarification answered |
-| `data_access.read` | data_access | SSE stream connect / disconnect (`details.phase`, low risk) |
-| `policy.evaluated` | policy | Budget recorded for a goal, or a tool call's cost impact (`details.enforced: false`) |
-| `policy.denied` | policy | Thread ownership check failed |
-| `config.changed` | config | pause / resume / emergency stop (`kill`: `riskLevel: high`, tag `emergency_stop`) |
+| `thread.created` | command (low) | A thread row was created for a command (`details.boundToCommand`) |
+| `thread.message_received` | command (low) | A `send_message` command added the user's message to a thread (`details.textLength`, never the text) |
+| `thread.access_denied` | policy (medium) | The command named a thread the user does not own (`denied`, `details.policy: thread_ownership`) |
+| `brain.llm_call` | brain (low) | Brain invoked (the invocation only); details hold output types and sizes (never text) |
+| `brain.reply_generated` | brain (low) | The brain replied (`details.textLength`) |
+| `brain.explanation_generated` | brain (low) | The brain explained something (`details.textLength`) |
+| `brain.clarification_requested` | brain (low) | The brain asked clarifying questions |
+| `brain.plan_created` / `brain.decision_made` | brain (low / medium) | Brain output of that kind (child of the brain span; a decision carries `low` / `medium` / `high` for keep / change / kill) |
+| `brain.error` | brain (medium) | Brain threw, or returned an invalid output / one that could not be stored |
+| `tool.proposed` | tool (low) | Brain proposed a tool call; it has not run (`partial` while it needs approval; the Hub executes no tools; parameter names only; risk is the tool's own) |
+| `budget.evaluated` | policy (medium) | A proposed tool call's cost impact (`details.enforced: false`, `limit: null`, `spent`, `proposed`; the decision is the brain's) |
+| `goal.created` | data_access (low) | `create_goal` stored a goal |
+| `goal.updated` | data_access (low) | The brain updated a goal (`details.changedFields`: names, not values) |
+| `goal.status_changed` | data_access (low) | The goal status moved (`details.from`, `details.to`; child of `goal.updated`) |
+| `goal.clarification_answered` | data_access (low) | The user answered a clarification ask |
+| `goal.budget_proposed` | policy (medium) | The goal was created with a budget (`details.proposedBy: user`, `enforced: false`) |
+| `goal.budget_approved` / `goal.budget_declined` | approval (medium / low) | The user approved / declined an approval ask that carried a cost effect (next to `approval.granted` / `approval.rejected`, which is its parent) |
+| `approval.requested` | approval (low) | Plan or tool call waiting for approval |
+| `approval.granted` / `approval.rejected` | approval (medium / low) | `approve_plan`, or `answer_ask` on a plan/action approval |
+| `approval.expired` | approval (low) | Ask expired (job run) |
+| `control.paused` / `control.resumed` | config (medium) | `control` command `pause` / `resume` (`details.scope`: `thread` or `workspace`) |
+| `control.emergency_stopped` | config (high) | `control` command `kill` (tag `emergency_stop`); the Hub's kill stops everything in scope, so it is not `control.killed` (reserved for one goal or run) |
+| `stream.connected` / `stream.disconnected` | data_access (low) | SSE stream opened / closed (`details.transport: sse`, resume position or last seq, duration; no address) |
 | `system.started` / `system.stopped` | system | Hub boot / shutdown |
 | `system.job_run` | system | Ask-expiry run that expired something (its own traceId) |
-| `system.error` | system | Unhandled 5xx, command processing failure, ask-expiry job failure |
+| `system.error` | system (medium) | Unhandled 5xx, command processing failure, ask-expiry job failure |
 
-Actions are the ones in the protocol's `AUDIT_ACTIONS`; the Hub does not invent names. Reads (polling
-`GET /v1/events?after=`, `/v1/threads`, ...) are not audited.
+Reads (polling `GET /v1/events?after=`, `/v1/threads`, ...) are not audited.
 
 Known limits: the Hub has no budget enforcement, so budget events are informational; pause/resume/kill
 only emit a `status` event (the mock brain does not really stop); `auth.denied` throttling is per replica.
@@ -570,4 +588,4 @@ Apache License 2.0 © Small Seed Labs
 
 **Note**: This is a PUBLIC repository. Never commit secrets. Use `.env` for local development and secrets management for production.
 
-**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.2.0` release tag.
+**Protocol**: `@smallseedlabs/proba-protocol` is pinned to the `v0.3.1` release tag.
