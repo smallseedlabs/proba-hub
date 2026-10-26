@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { AUDIT_ACTIONS, validateAuditEvent } from './vendor/proba-audit/index.js';
-import { createHubAudit, type AuditActionName } from './service.js';
+import { AUDIT_ACTION_INFO, type AuditActionName as CatalogActionName } from '@smallseedlabs/proba-protocol/audit';
+import { validateAuditEvent } from './vendor/proba-audit/index.js';
+import { createHubAudit, type AuditActionName, type DeprecatedAuditAction } from './service.js';
 import { newTraceContext, runWithTrace, setTraceUser, bindTraceId, startSpan } from './trace.js';
 import { MemoryOutbox, captureLogger, fixedClock, sequentialIds } from './test-support.js';
 
@@ -53,15 +54,52 @@ describe('HubAudit.emit', () => {
     expect(event.details).toEqual({ commandType: 'send_message', token: '[REDACTED]', note: 'mail [REDACTED_EMAIL]' });
   });
 
-  it('derives the category for every action in AUDIT_ACTIONS', async () => {
+  it('takes category and default risk from AUDIT_ACTION_INFO for every specific action (not from the action prefix)', async () => {
     const { audit, outbox } = setup();
-    for (const [category, actions] of Object.entries(AUDIT_ACTIONS)) {
-      for (const action of actions) {
-        await audit.emit({ action: action as AuditActionName, outcome: 'success' });
-        expect(outbox.events.at(-1)?.category).toBe(category);
-      }
+    const specific = (Object.keys(AUDIT_ACTION_INFO) as CatalogActionName[]).filter(
+      (a) => AUDIT_ACTION_INFO[a].status === 'specific'
+    );
+    for (const action of specific) {
+      await audit.emit({ action: action as AuditActionName, outcome: 'success' });
+      const event = outbox.events.at(-1)!;
+      expect(event.category, action).toBe(AUDIT_ACTION_INFO[action].category);
+      expect(event.riskLevel, action).toBe(AUDIT_ACTION_INFO[action].riskLevel);
     }
+    expect(outbox.events).toHaveLength(specific.length);
     expect(outbox.events.every((e) => validateAuditEvent(e).success)).toBe(true);
+    // The prefix is not the category for the domains that have no category of their own.
+    expect(AUDIT_ACTION_INFO['control.paused'].category).toBe('config');
+    expect(AUDIT_ACTION_INFO['goal.created'].category).toBe('data_access');
+  });
+
+  it('lets a producer raise or lower the default risk for one event', async () => {
+    const { audit, outbox } = setup();
+    await audit.emit({ action: 'tool.proposed', outcome: 'partial', riskLevel: 'high' });
+    expect(outbox.events[0].riskLevel).toBe('high');
+  });
+
+  it('refuses every generic or alias action (logs the preferred name, writes nothing)', async () => {
+    const { audit, outbox, lines } = setup();
+    const deprecated = (Object.keys(AUDIT_ACTION_INFO) as CatalogActionName[]).filter(
+      (a) => AUDIT_ACTION_INFO[a].status !== 'specific'
+    );
+    expect(deprecated.length).toBeGreaterThan(0);
+    for (const action of deprecated) {
+      expect(await audit.emit({ action: action as DeprecatedAuditAction as never, outcome: 'success' }), action).toBeNull();
+    }
+    expect(outbox.rows).toHaveLength(0);
+    expect(lines.filter((l) => l.level === 'error')).toHaveLength(deprecated.length);
+  });
+
+  it('keeps the compile-time DeprecatedAuditAction list equal to the catalog generic and alias set', () => {
+    const fromCatalog = (Object.keys(AUDIT_ACTION_INFO) as CatalogActionName[])
+      .filter((a) => AUDIT_ACTION_INFO[a].status !== 'specific')
+      .sort();
+    const listed: DeprecatedAuditAction[] = [
+      'brain.clarify_requested', 'tool.called', 'tool.completed', 'policy.evaluated', 'policy.denied',
+      'data_access.read', 'data_access.write', 'memory.read', 'memory.write', 'metrics.observation_stored', 'config.changed',
+    ];
+    expect([...listed].sort()).toEqual(fromCatalog);
   });
 
   it('chains spans: root has no parent, children point at the root or an explicit span', async () => {
@@ -72,7 +110,7 @@ describe('HubAudit.emit', () => {
       await audit.emit({ action: 'command.accepted', outcome: 'success' });
       const brain = startSpan();
       await audit.emit({ action: 'brain.llm_call', outcome: 'success', spanId: brain.spanId, parentSpanId: brain.parentSpanId });
-      await audit.emit({ action: 'tool.called', outcome: 'success', parentSpanId: brain.spanId });
+      await audit.emit({ action: 'tool.proposed', outcome: 'partial', parentSpanId: brain.spanId });
     });
     const [received, accepted, llm, tool] = outbox.events;
     expect(received.parentSpanId).toBeUndefined();
@@ -107,9 +145,9 @@ describe('HubAudit.emit', () => {
     expect(outbox.rows).toHaveLength(0);
   });
 
-  it('refuses an action that is not in AUDIT_ACTIONS (never invents one)', async () => {
+  it('refuses an action that is not in the catalog (never invents one)', async () => {
     const { audit, outbox, lines } = setup();
-    expect(await audit.emit({ action: 'goal.created' as AuditActionName, outcome: 'success' })).toBeNull();
+    expect(await audit.emit({ action: 'goal.invented' as AuditActionName, outcome: 'success' })).toBeNull();
     expect(outbox.rows).toHaveLength(0);
     expect(lines.some((l) => l.level === 'error')).toBe(true);
   });
@@ -135,7 +173,7 @@ describe('HubAudit.emit', () => {
   it('bestEffort never throws', async () => {
     const { audit, outbox, lines } = setup();
     outbox.failEnqueue = new Error('connection terminated');
-    expect(await audit.emit({ action: 'data_access.read', outcome: 'success' }, { bestEffort: true })).toBeNull();
+    expect(await audit.emit({ action: 'stream.connected', outcome: 'success' }, { bestEffort: true })).toBeNull();
     expect(lines.some((l) => l.msg.includes('best effort'))).toBe(true);
   });
 

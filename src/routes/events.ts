@@ -197,14 +197,13 @@ function handleSSE(
         log();
         void getAudit().emit(
           {
-            action: 'data_access.read',
+            action: 'stream.disconnected',
             outcome: 'success',
             userId,
             target: { type: 'event_stream', id: userId },
-            riskLevel: 'low',
             durationMs: Date.now() - openedAt,
             tags: ['sse'],
-            details: { phase: 'disconnect', lastSeq },
+            details: { transport: 'sse', lastSeq, durationMs: Date.now() - openedAt },
           },
           { bestEffort: true }
         );
@@ -245,14 +244,13 @@ function handleSSE(
   logger.info({ userId, lastSeq: initialSeq }, 'SSE connection established');
   void getAudit().emit(
     {
-      action: 'data_access.read',
+      action: 'stream.connected',
       outcome: 'success',
       root: true,
       userId,
       target: { type: 'event_stream', id: userId },
-      riskLevel: 'low',
       tags: ['sse'],
-      details: { phase: 'connect', resumeFromSeq: initialSeq },
+      details: { transport: 'sse', resumeFromSeq: initialSeq },
     },
     { bestEffort: true }
   );

@@ -12,16 +12,19 @@ import { currentTrace, runAsJob } from './audit/trace.js';
 import { getAudit } from './audit/service.js';
 import { createAuditRelay } from './audit/relay.js';
 import {
-  AUDIT_ACTIONS,
   PostgresOutboxStore,
   buildAuditEvent,
   validateAuditEvent,
   type AuditEvent,
 } from './audit/vendor/proba-audit/index.js';
+import { AUDIT_ACTION_INFO } from '@smallseedlabs/proba-protocol/audit';
 import { createTestUser, controlCommand, createGoalCommand, openSSE, waitForEvents, waitUntil } from './test-helpers.js';
 import type { BrainPort } from './types.js';
 
-const KNOWN_ACTIONS = new Set<string>(Object.values(AUDIT_ACTIONS).flat());
+/** Actions the Hub may emit: catalogued and `specific` (never generic or alias). */
+const SPECIFIC_ACTIONS = new Set<string>(
+  Object.entries(AUDIT_ACTION_INFO).filter(([, info]) => info.status === 'specific').map(([action]) => action)
+);
 
 const firebase = await createFakeFirebaseIssuer('audit-test');
 const app: FastifyInstance = await buildApp({
@@ -56,10 +59,11 @@ function expectOneConsistentTrace(events: AuditEvent[], traceId: string) {
   for (const event of events) {
     expect(event.traceId).toBe(traceId);
     expect(validateAuditEvent(event).success).toBe(true);
-    expect(KNOWN_ACTIONS.has(event.action)).toBe(true);
+    expect(SPECIFIC_ACTIONS.has(event.action), event.action).toBe(true);
+    // Category and default risk come from the catalog, not from the action prefix.
+    expect(event.category, event.action).toBe(AUDIT_ACTION_INFO[event.action as keyof typeof AUDIT_ACTION_INFO].category);
     expect(event.service).toBe('hub');
     expect(event.workspaceId).toBe('seedbed');
-    expect(event.action.startsWith(`${event.category}.`)).toBe(true);
   }
   const spanIds = new Set(events.map((e) => e.spanId));
   expect(spanIds.size).toBe(events.length); // unique span per event
@@ -166,7 +170,7 @@ describe('audit outbox: written in the action’s own transaction', () => {
       expect(actions).toContain('command.received');
       expect(actions).toContain('command.accepted');
       // Written inside the rolled-back transaction: must not exist.
-      expect(actions).not.toContain('data_access.write');
+      expect(actions).not.toContain('goal.clarification_answered');
       expect(actions).not.toContain('brain.llm_call');
       expect(actions).not.toContain('command.processed.success');
       const processed = events.filter((e) => e.action === 'command.processed');
@@ -222,8 +226,8 @@ describe('one traceId per /v1/commands request (happy_path through the web flow)
     expectOneConsistentTrace(a1, t1);
     expect(a1.map((e) => e.action)).toEqual(
       expect.arrayContaining([
-        'command.received', 'command.accepted', 'brain.llm_call', 'brain.clarify_requested',
-        'data_access.write', 'policy.evaluated', 'command.processed',
+        'command.received', 'command.accepted', 'thread.created', 'brain.llm_call', 'brain.clarification_requested',
+        'goal.created', 'goal.budget_proposed', 'command.processed',
       ])
     );
     const received = a1.find((e) => e.action === 'command.received')!;
@@ -233,12 +237,18 @@ describe('one traceId per /v1/commands request (happy_path through the web flow)
     expect(llm.parentSpanId).toBe(received.spanId);
     expect(llm.details).toMatchObject({ trigger: 'create_goal', outputCount: 1 });
     // The clarify output is a child of the brain span.
-    expect(a1.find((e) => e.action === 'brain.clarify_requested')!.parentSpanId).toBe(llm.spanId);
-    const goalWrite = a1.find((e) => e.action === 'data_access.write')!;
-    expect(goalWrite).toMatchObject({ target: { type: 'goal' }, details: { change: 'created', status: 'active' } });
+    expect(a1.find((e) => e.action === 'brain.clarification_requested')!.parentSpanId).toBe(llm.spanId);
+    const created = a1.find((e) => e.action === 'thread.created')!;
+    expect(created).toMatchObject({ category: 'command', target: { type: 'thread' } });
+    expect(created.parentSpanId).toBe(received.spanId);
+    const goalWrite = a1.find((e) => e.action === 'goal.created')!;
+    expect(goalWrite).toMatchObject({
+      category: 'data_access', riskLevel: 'low', target: { type: 'goal' }, details: { status: 'active', hasBudget: true },
+    });
     expect(goalWrite.goalId).toBeTruthy();
-    expect(a1.find((e) => e.action === 'policy.evaluated')!.details).toMatchObject({
-      policy: 'budget', decision: 'recorded', enforced: false, dailyBudget: 150, currency: 'GBP',
+    expect(a1.find((e) => e.action === 'goal.budget_proposed')).toMatchObject({
+      category: 'policy', riskLevel: 'medium', parentSpanId: goalWrite.spanId, goalId: goalWrite.goalId,
+      details: { proposedBy: 'user', enforced: false, dailyBudget: 150, currency: 'GBP' },
     });
     expectNoSecrets(a1, emailMarker, token);
 
@@ -248,10 +258,10 @@ describe('one traceId per /v1/commands request (happy_path through the web flow)
     const a2 = await waitForAction(t2, 'command.processed');
     expectOneConsistentTrace(a2, t2);
     expect(a2.map((e) => e.action)).toEqual(
-      expect.arrayContaining(['data_access.write', 'brain.llm_call', 'brain.plan_created', 'approval.requested'])
+      expect.arrayContaining(['goal.clarification_answered', 'brain.llm_call', 'brain.plan_created', 'approval.requested'])
     );
-    expect(a2.find((e) => e.action === 'data_access.write' && e.details.change === 'ask_answered')!.details).toMatchObject({
-      askType: 'clarify',
+    expect(a2.find((e) => e.action === 'goal.clarification_answered')).toMatchObject({
+      category: 'data_access', goalId: goalWrite.goalId, details: { askType: 'clarify' },
     });
     const plan = events.find((e) => e.type === 'ask' && e.payload.askType === 'plan_approval');
     const planEvent = a2.find((e) => e.action === 'brain.plan_created')!;
@@ -265,15 +275,16 @@ describe('one traceId per /v1/commands request (happy_path through the web flow)
     const a3 = await waitForAction(t3, 'command.processed');
     expectOneConsistentTrace(a3, t3);
     expect(a3.map((e) => e.action)).toEqual(
-      expect.arrayContaining(['approval.granted', 'brain.llm_call', 'tool.called', 'policy.evaluated', 'approval.requested'])
+      expect.arrayContaining(['approval.granted', 'brain.llm_call', 'tool.proposed', 'budget.evaluated', 'approval.requested'])
     );
-    const tool = a3.find((e) => e.action === 'tool.called')!;
+    const tool = a3.find((e) => e.action === 'tool.proposed')!;
     expect(tool).toMatchObject({ outcome: 'partial', riskLevel: 'medium', target: { type: 'tool', id: 'adjust_budget' } });
     expect(tool.details).toMatchObject({ needsApproval: true, executed: false, parameterKeys: ['dailyBudget'] });
     expect(JSON.stringify(tool.details)).not.toContain('120'); // parameter values are not recorded
-    const toolBudget = a3.find((e) => e.action === 'policy.evaluated')!;
+    const toolBudget = a3.find((e) => e.action === 'budget.evaluated')!;
+    expect(toolBudget).toMatchObject({ category: 'policy', riskLevel: 'medium' });
     expect(toolBudget.parentSpanId).toBe(tool.spanId);
-    expect(toolBudget.details).toMatchObject({ policy: 'budget', decision: 'requires_approval', enforced: false, proposedCost: 120 });
+    expect(toolBudget.details).toMatchObject({ decision: 'requires_approval', enforced: false, limit: null, proposed: 120 });
     expect(a3.find((e) => e.action === 'approval.granted')!.target).toEqual({ type: 'plan', id: plan.payload.askId });
 
     // 4. approve the action -> reply + decision
@@ -283,8 +294,15 @@ describe('one traceId per /v1/commands request (happy_path through the web flow)
     const a4 = await waitForAction(t4, 'command.processed');
     expectOneConsistentTrace(a4, t4);
     expect(a4.map((e) => e.action)).toEqual(
-      expect.arrayContaining(['approval.granted', 'brain.llm_call', 'brain.decision_made', 'data_access.write'])
+      expect.arrayContaining(['approval.granted', 'brain.llm_call', 'brain.reply_generated', 'brain.decision_made', 'goal.updated'])
     );
+    // The action ask carried a cost effect, so approving it is also a budget decision (the Hub enforces nothing).
+    const approvedAt = a4.find((e) => e.action === 'approval.granted')!;
+    expect(a4.find((e) => e.action === 'goal.budget_approved')).toMatchObject({
+      category: 'approval', goalId: goalWrite.goalId, parentSpanId: approvedAt.spanId,
+      target: { type: 'ask', id: action.payload.askId }, details: { enforced: false, proposedCost: 120 },
+    });
+    expect(a4.map((e) => e.action)).not.toContain('goal.budget_declined');
     expect(a4.find((e) => e.action === 'brain.decision_made')).toMatchObject({ riskLevel: 'low', details: { decision: 'keep' } });
     expect(a4.find((e) => e.action === 'brain.llm_call')!.details).toMatchObject({
       outputs: [{ type: 'reply', textLength: 'Launching campaign with adjusted budget'.length }, { type: 'decision', decision: 'keep' }],
@@ -342,7 +360,7 @@ describe('rejected commands, denials and control', () => {
     expect(events.find((e) => e.action === 'command.rejected')!.details).toMatchObject({ stage: 'payload', commandType: 'send_message' });
   });
 
-  it('audits a thread the user does not own as policy.denied + command.rejected', async () => {
+  it('audits a thread the user does not own as thread.access_denied + command.rejected', async () => {
     const clientMsgId = randomUUID();
     const foreignThread = randomUUID();
     const res = await send({
@@ -351,13 +369,13 @@ describe('rejected commands, denials and control', () => {
     expect(JSON.parse(res.body)).toMatchObject({ status: 'rejected', reason: 'thread_not_found' });
     const events = await waitForAction(clientMsgId, 'command.rejected');
     expectOneConsistentTrace(events, clientMsgId);
-    expect(events.map((e) => e.action).sort()).toEqual(['command.received', 'command.rejected', 'policy.denied']);
-    expect(events.find((e) => e.action === 'policy.denied')).toMatchObject({
-      outcome: 'denied', errorCode: 'thread_not_found', target: { type: 'thread', id: foreignThread }, riskLevel: 'medium',
+    expect(events.map((e) => e.action).sort()).toEqual(['command.received', 'command.rejected', 'thread.access_denied']);
+    expect(events.find((e) => e.action === 'thread.access_denied')).toMatchObject({
+      category: 'policy', outcome: 'denied', errorCode: 'thread_not_found', target: { type: 'thread', id: foreignThread }, riskLevel: 'medium',
     });
   });
 
-  it('audits pause/resume/emergency stop as config.changed with risk and an emergency_stop tag', async () => {
+  it('audits pause/resume/kill as control.paused / control.resumed / control.emergency_stopped (config category, catalog risk)', async () => {
     const results: Record<string, AuditEvent[]> = {};
     for (const action of ['pause', 'resume', 'kill'] as const) {
       const command = controlCommand(user.threadId, action);
@@ -366,11 +384,148 @@ describe('rejected commands, denials and control', () => {
       results[action] = await waitForAction(command.clientMsgId, 'command.processed');
       expectOneConsistentTrace(results[action], command.clientMsgId);
     }
-    const change = (a: string) => results[a].find((e) => e.action === 'config.changed')!;
-    expect(change('pause')).toMatchObject({ riskLevel: 'medium', details: { control: 'pause' } });
-    expect(change('resume')).toMatchObject({ riskLevel: 'low', details: { control: 'resume' } });
-    expect(change('kill')).toMatchObject({ riskLevel: 'high', tags: ['emergency_stop'], details: { control: 'kill' } });
-    expect(change('kill').target).toEqual({ type: 'execution_state', id: user.threadId });
+    const change = (a: string, action: string) => results[a].find((e) => e.action === action)!;
+    expect(change('pause', 'control.paused')).toMatchObject({ category: 'config', riskLevel: 'medium', details: { control: 'pause' } });
+    expect(change('resume', 'control.resumed')).toMatchObject({ category: 'config', riskLevel: 'medium', details: { control: 'resume' } });
+    expect(change('kill', 'control.emergency_stopped')).toMatchObject({
+      category: 'config', riskLevel: 'high', tags: ['emergency_stop'], details: { control: 'kill', scope: 'thread' },
+    });
+    for (const a of ['pause', 'resume', 'kill']) {
+      expect(results[a].map((e) => e.action)).not.toContain('control.killed');
+    }
+    expect(change('kill', 'control.emergency_stopped').target).toEqual({ type: 'execution_state', id: user.threadId });
+  });
+
+  it('audits a user message (thread.created + thread.message_received) without its text, and the brain reply/explanation by length', async () => {
+    const text = 'secret-campaign-brief-xyz';
+    const brain: BrainPort = {
+      process: async (envelope) =>
+        envelope.type === 'explain'
+          ? [{ type: 'explain', target: 'campaign-1', explanation: 'Because the CPA fell by 12%.' }]
+          : [{ type: 'reply', text: 'Got it.' }],
+    };
+    const local = await buildApp({ startBackgroundJobs: false, brain });
+    try {
+      const u = await createTestUser(local, 'message');
+      const clientMsgId = randomUUID();
+      const res = await local.inject({
+        method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+        payload: { kind: 'command', clientMsgId, type: 'send_message', payload: { text }, sentAt: new Date().toISOString() },
+      });
+      expect(JSON.parse(res.body).status).toBe('accepted');
+      const events = await waitForAction(clientMsgId, 'command.processed');
+      expectOneConsistentTrace(events, clientMsgId);
+      const received = events.find((e) => e.action === 'command.received')!;
+      const created = events.find((e) => e.action === 'thread.created')!;
+      const message = events.find((e) => e.action === 'thread.message_received')!;
+      expect(created).toMatchObject({ category: 'command', riskLevel: 'low', parentSpanId: received.spanId });
+      expect(message).toMatchObject({
+        category: 'command', threadId: created.target!.id, details: { textLength: text.length },
+      });
+      expect(message.parentSpanId).toBe(received.spanId);
+      const reply = events.find((e) => e.action === 'brain.reply_generated')!;
+      expect(reply).toMatchObject({ category: 'brain', riskLevel: 'low', details: { textLength: 'Got it.'.length } });
+      expect(reply.parentSpanId).toBe(events.find((e) => e.action === 'brain.llm_call')!.spanId);
+      expectNoSecrets(events, text, 'Got it.');
+
+      const explainId = randomUUID();
+      const explainRes = await local.inject({
+        method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+        payload: {
+          kind: 'command', clientMsgId: explainId, type: 'explain', threadId: message.threadId,
+          payload: { targetRef: 'campaign-1' }, sentAt: new Date().toISOString(),
+        },
+      });
+      expect(JSON.parse(explainRes.body).status).toBe('accepted');
+      const explained = await waitForAction(explainId, 'command.processed');
+      expect(explained.find((e) => e.action === 'brain.explanation_generated')).toMatchObject({
+        category: 'brain', details: { textLength: 'Because the CPA fell by 12%.'.length },
+      });
+      expectNoSecrets(explained, 'Because the CPA');
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('audits a goal status change as goal.updated + goal.status_changed (from, to) and no budget proposal without a budget', async () => {
+    let nextUpdate: { status: 'paused' } | undefined;
+    const brain: BrainPort = {
+      process: async () => [{ type: 'reply', text: 'ok' }],
+      takeGoalUpdate: () => {
+        const update = nextUpdate;
+        nextUpdate = undefined;
+        return update;
+      },
+    };
+    const local = await buildApp({ startBackgroundJobs: false, brain });
+    try {
+      const u = await createTestUser(local, 'goalstatus');
+      const post = async (type: string, payload: Record<string, unknown>, threadId?: string) => {
+        const clientMsgId = randomUUID();
+        const res = await local.inject({
+          method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+          payload: { kind: 'command', clientMsgId, type, ...(threadId ? { threadId } : {}), payload, sentAt: new Date().toISOString() },
+        });
+        expect(JSON.parse(res.body).status).toBe('accepted');
+        return waitForAction(clientMsgId, 'command.processed');
+      };
+      const created = await post('create_goal', { title: 'No budget goal' });
+      expect(created.map((e) => e.action)).toContain('goal.created');
+      expect(created.map((e) => e.action)).not.toContain('goal.budget_proposed');
+      const goalId = created.find((e) => e.action === 'goal.created')!.goalId!;
+      const threadId = created.find((e) => e.action === 'goal.created')!.threadId!;
+
+      nextUpdate = { status: 'paused' };
+      const updated = await post('send_message', { text: 'pause it' }, threadId);
+      const goalUpdated = updated.find((e) => e.action === 'goal.updated')!;
+      expect(goalUpdated).toMatchObject({ goalId, details: { changedFields: ['status'] } });
+      const changed = updated.find((e) => e.action === 'goal.status_changed')!;
+      expect(changed).toMatchObject({ category: 'data_access', goalId, details: { from: 'active', to: 'paused' } });
+      expect(changed.parentSpanId).toBe(goalUpdated.spanId);
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('audits declining a costed action as approval.rejected + goal.budget_declined', async () => {
+    const brain: BrainPort = {
+      process: async (envelope) =>
+        envelope.type === 'send_message'
+          ? [{
+              type: 'tool_call', tool: 'adjust_budget', parameters: { dailyBudget: 120 }, needsApproval: true, risk: 'medium',
+              costImpact: { current: 100, proposed: 120 },
+            }]
+          : [{ type: 'reply', text: 'ok' }],
+    };
+    const local = await buildApp({ startBackgroundJobs: false, brain });
+    try {
+      const u = await createTestUser(local, 'declined');
+      const post = async (type: string, payload: Record<string, unknown>, threadId?: string) => {
+        const clientMsgId = randomUUID();
+        const res = await local.inject({
+          method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+          payload: { kind: 'command', clientMsgId, type, ...(threadId ? { threadId } : {}), payload, sentAt: new Date().toISOString() },
+        });
+        expect(JSON.parse(res.body).status).toBe('accepted');
+        return waitForAction(clientMsgId, 'command.processed');
+      };
+      const goal = await post('create_goal', { title: 'Costed goal' });
+      const created = goal.find((e) => e.action === 'goal.created')!;
+      const threadId = created.threadId!;
+      await post('send_message', { text: 'raise the budget' }, threadId);
+      const events = await waitForEvents(local, u.token, (evs) => evs.some((e) => e.type === 'ask' && e.payload.askType === 'action_approval'));
+      const ask = events.find((e) => e.type === 'ask' && e.payload.askType === 'action_approval');
+      const declined = await post('answer_ask', { askId: ask.payload.askId, choice: 'reject' }, threadId);
+      const rejected = declined.find((e) => e.action === 'approval.rejected')!;
+      expect(rejected).toMatchObject({ category: 'approval', riskLevel: 'low' });
+      expect(declined.find((e) => e.action === 'goal.budget_declined')).toMatchObject({
+        category: 'approval', riskLevel: 'low', goalId: created.goalId, parentSpanId: rejected.spanId,
+        target: { type: 'ask', id: ask.payload.askId }, details: { enforced: false, currentCost: 100, proposedCost: 120 },
+      });
+      expect(declined.map((e) => e.action)).not.toContain('goal.budget_approved');
+    } finally {
+      await local.close();
+    }
   });
 
   it('audits a failing brain and an invalid brain output, with secrets redacted', async () => {
@@ -501,11 +656,12 @@ describe('SSE connect/disconnect audit', () => {
       expect(sse.status).toBe(200);
       const traceId = sse.headers.get('x-trace-id')!;
       expect(traceId).toMatch(/^[0-9a-f-]{36}$/);
-      await waitForAction(traceId, 'data_access.read', 1);
+      await waitForAction(traceId, 'stream.connected', 1);
       sse.close();
       await sse.closed;
-      const events = await waitForAction(traceId, 'data_access.read', 2);
-      expect(events.map((e) => e.details.phase)).toEqual(['connect', 'disconnect']);
+      const events = await waitForAction(traceId, 'stream.disconnected', 1);
+      expect(events.map((e) => e.action)).toEqual(['stream.connected', 'stream.disconnected']);
+      expect(events.every((e) => e.category === 'data_access' && e.details.transport === 'sse')).toBe(true);
       expect(events.every((e) => e.target?.type === 'event_stream' && e.riskLevel === 'low')).toBe(true);
       expect(events[1].parentSpanId).toBe(events[0].spanId);
       expect(events[1].durationMs).toBeGreaterThanOrEqual(0);

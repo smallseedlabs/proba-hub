@@ -58,12 +58,11 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
             // The thread exists for someone else or not at all: an ownership check failed.
             await audit.emit(
               {
-                action: 'policy.denied',
+                action: 'thread.access_denied',
                 outcome: 'denied',
                 userId,
                 target: { type: 'thread', id: threadId ?? 'unknown' },
                 errorCode: reason,
-                riskLevel: 'medium',
                 parentSpanId,
                 details: { policy: 'thread_ownership' },
               },
@@ -125,6 +124,7 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
       envelope = await transaction(async (client: PoolClient) => {
         let accepted = envelope;
         let newThread = false;
+        let createdThreadId: string | undefined;
         if (!envelope.threadId) {
           if (envelope.type === 'send_message' || envelope.type === 'create_goal') {
             // A new conversation: give it its own thread so the brain state, goal
@@ -139,11 +139,13 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
             );
             accepted = { ...envelope, threadId: created.rows[0].id };
             newThread = true;
+            createdThreadId = created.rows[0].id;
           } else {
-            await client.query('INSERT INTO threads (user_id, status) VALUES ($1, $2) RETURNING id', [
-              userId,
-              'active',
-            ]);
+            const created = await client.query<{ id: string }>(
+              'INSERT INTO threads (user_id, status) VALUES ($1, $2) RETURNING id',
+              [userId, 'active']
+            );
+            createdThreadId = created.rows[0]?.id;
           }
         }
         const received = await audit.emit(
@@ -169,6 +171,36 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
           },
           { tx: client }
         );
+        if (createdThreadId) {
+          await audit.emit(
+            {
+              action: 'thread.created',
+              outcome: 'success',
+              userId,
+              threadId: newThread ? createdThreadId : undefined,
+              target: { type: 'thread', id: createdThreadId },
+              parentSpanId: received?.spanId,
+              details: { ...baseDetails, boundToCommand: newThread },
+            },
+            { tx: client }
+          );
+        }
+        if (accepted.type === 'send_message') {
+          // The user's message joins the thread. Length only, never the text.
+          const text = (accepted.payload as { text?: unknown }).text;
+          await audit.emit(
+            {
+              action: 'thread.message_received',
+              outcome: 'success',
+              userId,
+              threadId: accepted.threadId,
+              target: accepted.threadId ? { type: 'thread', id: accepted.threadId } : undefined,
+              parentSpanId: received?.spanId,
+              details: { clientMsgId: accepted.clientMsgId, textLength: typeof text === 'string' ? text.length : 0 },
+            },
+            { tx: client }
+          );
+        }
         return accepted;
       });
 
