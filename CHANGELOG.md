@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Audit publisher port: the audit relay publishes through the publish half of proba-audit's `EventBus`, and
+  `AUDIT_PUBLISHER` picks the adapter (`redis` default, `log`). Redis is loaded only when chosen. An unknown
+  value fails at startup.
+- CI check `Vendored proba-audit matches pin`: `src/audit/vendor/proba-audit/UPSTREAM_COMMIT` pins the
+  proba-audit commit and `scripts/check-vendored-audit.mjs` diffs the vendored copy against it.
+
 - Optional raw text on audit events (`AUDIT_CONTENT_ENABLED`, default `false`): `thread.message_received`,
   `brain.reply_generated`, `brain.explanation_generated` and `brain.clarification_requested` carry the text in the protocol 0.3.3
   `content` field, in the same transaction and outbox row, with passwords, tokens, API keys, private keys and card numbers masked

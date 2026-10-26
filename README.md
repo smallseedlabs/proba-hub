@@ -91,7 +91,7 @@ Key variables:
 - `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
 - `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
-- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events, secrets masked): see [Audit trail](#audit-trail)
+- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_PUBLISHER` (`redis` default, or `log`; see [Audit trail](#audit-trail)), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events, secrets masked): see [Audit trail](#audit-trail)
 
 ### Running with Docker Compose
 
@@ -446,9 +446,17 @@ Hub action ──same DB transaction──> audit_outbox ──AuditRelay──>
   adapter) with the Hub's existing Redis client, and marks them published. Delivery is at-least-once;
   the consumer dedupes by `eventId`. It does not touch the SSE relay or the `proba:events` pub/sub channel.
   With `AUDIT_RELAY_ENABLED=false` events keep accumulating in `audit_outbox` until a relay runs.
+- **Publisher port.** The relay publishes through the publish half of proba-audit's `EventBus` port
+  (`src/audit/publisher.ts`), so Redis is not hard-wired. `AUDIT_PUBLISHER` picks the adapter: `redis`
+  (default; the stream above) or `log` (writes event ids, never details or text, to the Hub log; no broker,
+  for local diagnostics). An unknown value fails at startup. A new adapter implements `EventBus` and is added
+  to `AUDIT_PUBLISHERS` in `src/config.ts` and to `createAuditPublisher`.
 - **Vendored code.** The emitter, outbox store, relay and stream publisher are copies of proba-audit
   `038d63f` under `src/audit/vendor/proba-audit/` (see its README) behind the same `AuditEmitter` /
-  `OutboxStore` interfaces, so they can be swapped for published packages later.
+  `OutboxStore` interfaces, so they can be swapped for published packages later. The pinned commit is in
+  `src/audit/vendor/proba-audit/UPSTREAM_COMMIT`; CI (`Vendored proba-audit matches pin`) checks that commit
+  out and fails if the copy drifts from it (`scripts/check-vendored-audit.mjs`; run locally with
+  `npm run check:vendored-audit -- <path to proba-audit at that commit>`).
 - **One traceId per request.** For `POST /v1/commands` the traceId is the command's `clientMsgId` (a UUID
   in the protocol). Otherwise (other routes, or a `clientMsgId` that is not a UUID: the id is then
   recorded in `details.clientMsgId`) a UUID is generated; background jobs get a fresh id per run. The

@@ -43,6 +43,33 @@ jobs:
       - name: Run TypeScript compiler
         run: npm run typecheck
   
+  vendored-audit:
+    name: Vendored proba-audit matches pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned proba-audit commit
+        id: pin
+        run: echo "sha=$(tr -d '[:space:]' < src/audit/vendor/proba-audit/UPSTREAM_COMMIT)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out proba-audit at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: smallseedlabs/proba-audit
+          ref: ${{ steps.pin.outputs.sha }}
+          path: .proba-audit-pin
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Fails when the vendored emitter/outbox/relay/publisher files differ from
+      # upstream (beyond the documented edits) or when an unlisted file appears.
+      - name: Diff vendored copy against the pinned proba-audit commit
+        run: node scripts/check-vendored-audit.mjs .proba-audit-pin
+
   validate-scenarios:
     name: Validate Scenarios
     runs-on: ubuntu-latest
