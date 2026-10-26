@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY scripts/copy-assets.mjs ./scripts/copy-assets.mjs
 RUN npm run build
 
 # Stage 2: Production
-FROM node:20-alpine
+FROM node:26-alpine
 
 RUN addgroup -g 1001 -S proba && \
     adduser -u 1001 -S proba -G proba
