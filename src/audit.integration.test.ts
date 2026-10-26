@@ -9,7 +9,7 @@ import { createFakeFirebaseIssuer } from './auth/firebase-testing.js';
 import { createFirebaseTokenVerifier } from './auth/firebase.js';
 import { processExpiredAsks } from './services/ask-expiry.js';
 import { currentTrace, runAsJob } from './audit/trace.js';
-import { getAudit } from './audit/service.js';
+import { createHubAudit, getAudit, setAuditForTests } from './audit/service.js';
 import { createAuditRelay } from './audit/relay.js';
 import {
   PostgresOutboxStore,
@@ -443,6 +443,59 @@ describe('rejected commands, denials and control', () => {
       });
       expectNoSecrets(explained, 'Because the CPA');
     } finally {
+      await local.close();
+    }
+  });
+
+  it('with AUDIT_CONTENT_ENABLED, the message, reply, explanation and clarification texts travel as content (secrets masked, lengths kept in details)', async () => {
+    setAuditForTests(createHubAudit({ outbox: new PostgresOutboxStore({ pool }), contentEnabled: true }));
+    const text = 'Plan the brief for jane@example.com, password: hunter2, card 4111 1111 1111 1111';
+    const brain: BrainPort = {
+      process: async (envelope) =>
+        envelope.type === 'explain'
+          ? [{ type: 'explain', target: 'campaign-1', explanation: 'Because the CPA fell by 12%.' }]
+          : envelope.type === 'create_goal'
+            ? [{ type: 'clarify', reason: 'Need the audience', questions: [{ id: 'q1', text: 'Who is it for?', type: 'text' }] }]
+            : [{ type: 'reply', text: 'Got it, Bearer abc.def.ghi is not stored.' }],
+    };
+    const local = await buildApp({ startBackgroundJobs: false, brain });
+    try {
+      const u = await createTestUser(local, 'content');
+      const post = async (type: string, payload: object, threadId?: string) => {
+        const clientMsgId = randomUUID();
+        const res = await local.inject({
+          method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+          payload: { kind: 'command', clientMsgId, type, payload, ...(threadId ? { threadId } : {}), sentAt: new Date().toISOString() },
+        });
+        expect(JSON.parse(res.body).status).toBe('accepted');
+        return { clientMsgId, events: await waitForAction(clientMsgId, 'command.processed') };
+      };
+
+      const sent = await post('send_message', { text });
+      expectOneConsistentTrace(sent.events, sent.clientMsgId);
+      const message = sent.events.find((e) => e.action === 'thread.message_received')!;
+      const maskedText = 'Plan the brief for jane@example.com, password: [REDACTED], card [REDACTED_CARD]';
+      expect(message.content).toEqual({ kind: 'user_message', text: maskedText, truncated: false, originalLength: maskedText.length, redactions: 2 });
+      expect(message.details).toMatchObject({ textLength: text.length });
+      expect(JSON.stringify(message)).not.toMatch(/hunter2|4111/);
+      const reply = sent.events.find((e) => e.action === 'brain.reply_generated')!;
+      expect(reply.content).toMatchObject({ kind: 'brain_reply', text: 'Got it, Bearer [REDACTED] is not stored.', redactions: 1, truncated: false });
+      expect(reply.details).toMatchObject({ textLength: 'Got it, Bearer abc.def.ghi is not stored.'.length });
+      for (const event of sent.events) expect(validateAuditEvent(event).success).toBe(true);
+      // Events that are not about text carry none.
+      expect(sent.events.filter((e) => e.content).map((e) => e.action).sort()).toEqual(['brain.reply_generated', 'thread.message_received']);
+
+      const explained = await post('explain', { targetRef: 'campaign-1' }, message.threadId);
+      expect(explained.events.find((e) => e.action === 'brain.explanation_generated')!.content).toMatchObject({
+        kind: 'explanation', text: 'Because the CPA fell by 12%.',
+      });
+
+      const goal = await post('create_goal', { title: 'Brief' });
+      expect(goal.events.find((e) => e.action === 'brain.clarification_requested')!.content).toMatchObject({
+        kind: 'brain_clarification', text: 'Need the audience\n1. Who is it for?',
+      });
+    } finally {
+      setAuditForTests(undefined);
       await local.close();
     }
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactDetails, redactString } from './redact.js';
+import { maskSecretsInText, redactDetails, redactString } from './redact.js';
 
 describe('redactString', () => {
   it('masks emails, bearer tokens, JWTs and token query params', () => {
@@ -84,5 +84,57 @@ describe('redactDetails', () => {
     expect(redactDetails(undefined)).toEqual({});
     expect(redactDetails('x')).toEqual({});
     expect(redactDetails([1, 2])).toEqual({});
+  });
+});
+
+describe('maskSecretsInText (raw text of AuditEvent.content: secrets only)', () => {
+  it('keeps ordinary text exactly as written, including emails, names, numbers and punctuation', () => {
+    const text = 'Hi Jane Doe (jane@example.com), launch the spring campaign with £1,500 daily; call +44 20 7946 0958. The token is expired, right?';
+    expect(maskSecretsInText(text)).toEqual({ text, redactions: 0 });
+  });
+
+  it('masks passwords, labelled and spoken, keeping the label', () => {
+    expect(maskSecretsInText('password: hunter2 ok')).toEqual({ text: 'password: [REDACTED] ok', redactions: 1 });
+    expect(maskSecretsInText('my password is hunter2, thanks')).toEqual({ text: 'my password is [REDACTED], thanks', redactions: 1 });
+    expect(maskSecretsInText('PASSWD="correct horse battery"').text).toBe('PASSWD=[REDACTED]');
+    expect(maskSecretsInText('pin = 4821').text).toBe('pin = [REDACTED]');
+  });
+
+  it('masks tokens: bearer, JWT, query parameters, labelled', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxIn0.c2lnbmF0dXJl';
+    const out = maskSecretsInText(`Authorization: Bearer abc.def-ghi_123 and ${jwt} and /x?token=zzz999&y=1 and access_token: qwe123`);
+    expect(out.text).toBe('Authorization: Bearer [REDACTED] and [REDACTED_TOKEN] and /x?token=[REDACTED]&y=1 and access_token: [REDACTED]');
+    expect(out.redactions).toBe(4);
+  });
+
+  it('masks API keys by prefix and by label', () => {
+    const out = maskSecretsInText(
+      'stripe sk_live_51HabcdEFGHijklMNOPqrst, github ghp_abcdefghijklmnopqrstuvwxyz0123456789, aws AKIAIOSFODNN7EXAMPLE, slack xoxb-1234567890-abcdefghij, api_key=abcd1234'
+    );
+    expect(out.text).toBe('stripe [REDACTED_KEY], github [REDACTED_KEY], aws [REDACTED_KEY], slack [REDACTED_KEY], api_key=[REDACTED]');
+    expect(out.redactions).toBe(5);
+  });
+
+  it('masks private key blocks', () => {
+    const out = maskSecretsInText('key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----\nthanks');
+    expect(out.text).toBe('key:\n[REDACTED_PRIVATE_KEY]\nthanks');
+    expect(out.redactions).toBe(1);
+  });
+
+  it('masks payment card numbers that pass the Luhn check, with or without separators', () => {
+    expect(maskSecretsInText('card 4111 1111 1111 1111 exp 12/29').text).toBe('card [REDACTED_CARD] exp 12/29');
+    expect(maskSecretsInText('4242-4242-4242-4242').text).toBe('[REDACTED_CARD]');
+    expect(maskSecretsInText('5555555555554444').redactions).toBe(1);
+  });
+
+  it('keeps long numbers that are not cards', () => {
+    expect(maskSecretsInText('order 1234567890123456 and budget 25000000000000').redactions).toBe(0);
+    expect(maskSecretsInText('1234 5678').text).toBe('1234 5678');
+  });
+
+  it('returns an empty text for a non-string and never throws', () => {
+    expect(maskSecretsInText(undefined)).toEqual({ text: '', redactions: 0 });
+    expect(maskSecretsInText({ a: 1 })).toEqual({ text: '', redactions: 0 });
+    expect(() => maskSecretsInText('x'.repeat(200_000))).not.toThrow();
   });
 });

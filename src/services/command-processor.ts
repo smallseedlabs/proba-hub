@@ -77,6 +77,12 @@ function summarizeOutput(output: unknown): Record<string, unknown> {
   }
 }
 
+/** The question the user is asked, as one readable text: the reason, then each question. */
+function clarificationText(output: { reason?: string; questions: Array<{ text: string }> }): string {
+  const lines = output.questions.map((q, i) => `${i + 1}. ${q.text}`);
+  return [output.reason, ...lines].filter((l): l is string => typeof l === 'string' && l.length > 0).join('\n');
+}
+
 export class CommandProcessor {
   constructor(private brain: BrainPort) {}
 
@@ -506,8 +512,9 @@ export class CommandProcessor {
             outcome: 'success',
             ...base,
             parentSpanId: brainSpan.spanId,
-            // Length only, never the text.
+            // `details` has the length only; the text goes in `content` (when enabled, secrets masked).
             details: { textLength: output.text.length },
+            content: { kind: 'brain_reply', text: output.text },
           },
           tx
         );
@@ -522,6 +529,7 @@ export class CommandProcessor {
             parentSpanId: brainSpan.spanId,
             target: { type: 'subject', id: String(output.target).slice(0, 128) },
             details: { textLength: output.explanation.length },
+            content: { kind: 'explanation', text: output.explanation },
           },
           tx
         );
@@ -536,6 +544,7 @@ export class CommandProcessor {
             parentSpanId: brainSpan.spanId,
             target: askId ? { type: 'ask', id: askId } : undefined,
             details: { askType: 'clarify', questionCount: output.questions.length },
+            content: { kind: 'brain_clarification', text: clarificationText(output) },
           },
           tx
         );

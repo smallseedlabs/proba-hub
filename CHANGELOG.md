@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional raw text on audit events (`AUDIT_CONTENT_ENABLED`, default `false`): `thread.message_received`,
+  `brain.reply_generated`, `brain.explanation_generated` and `brain.clarification_requested` carry the text in the protocol 0.3.3
+  `content` field, in the same transaction and outbox row, with passwords, tokens, API keys, private keys and card numbers masked
+  (`maskSecretsInText`, "secrets only": ordinary text stays as written) and long text truncated and flagged. `details.textLength` is kept.
+
 ### Changed
 
 - Audit actions are now the specific names of the protocol v0.3.1 catalog: `goal.created|updated|
@@ -18,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never emitted any more. The event `category` and default `riskLevel` come from `AUDIT_ACTION_INFO`
   (not the action prefix). Anything querying the old names in ClickHouse must follow.
 - `@smallseedlabs/proba-protocol` is pinned to `v0.3.1` (was `v0.2.0`).
+- `@smallseedlabs/proba-protocol` is pinned to the commit of v0.3.3's PR (`2fdfddf`) until `v0.3.3` is tagged; then pin `#v0.3.3`.
 
 ### Added
 

@@ -95,3 +95,83 @@ export function redactDetails(details: unknown, options: RedactOptions = {}): Re
     return { redactionError: true };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Raw text (AuditEvent.content): "mask secrets only".
+//
+// `content` carries what a person or the brain said, so ordinary text (names, emails, plans,
+// numbers) stays as written. Only things that must never be stored are masked: passwords,
+// tokens, API keys, private keys and payment card numbers. Better to mask a harmless word
+// that looks like a secret than to keep a real one.
+// ---------------------------------------------------------------------------
+
+const PRIVATE_KEY_BLOCK_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
+/** Credentials with a recognisable prefix: Stripe/OpenAI/Anthropic style, GitHub, Slack, Google, AWS. */
+const KEY_PREFIX_RE =
+  /\b(?:(?:sk|pk|rk)[-_](?:live|test|proj|ant|svcacct)?[-_]?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16})\b/g;
+/** `password: hunter2`, `api_key=abc`, `token: abc`. Keeps the label, masks the value. */
+const LABELLED_SECRET_RE =
+  /\b((?:pass(?:word|wd|code)?|pwd|secret|api[ _-]?key|apikey|(?:access|auth|refresh|session|id)[ _-]?token|token|client[ _-]?secret|private[ _-]?key|pin)\s*[:=]\s*)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi;
+/** `my password is hunter2`: only for words that are secrets in themselves (not "the token is expired"). */
+const SPOKEN_SECRET_RE = /\b((?:pass(?:word|wd|code)?|pwd|pin|secret|api[ _-]?key)\s+(?:is|was|=)\s+)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi;
+const CARD_CANDIDATE_RE = /\b(?:\d[ -]?){12,18}\d\b/g;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+export interface MaskedText {
+  text: string;
+  /** How many secrets were masked. */
+  redactions: number;
+}
+
+/**
+ * Mask secrets in free text and keep everything else as written. Never throws; non-strings
+ * give an empty text. Length is not capped here (buildAuditContent truncates).
+ */
+export function maskSecretsInText(value: unknown): MaskedText {
+  if (typeof value !== 'string') return { text: '', redactions: 0 };
+  let redactions = 0;
+  const mask = (replacement: string) => () => {
+    redactions += 1;
+    return replacement;
+  };
+  const maskValue = (_m: string, label: string) => {
+    redactions += 1;
+    return `${label}[REDACTED]`;
+  };
+  try {
+    const text = value
+      .replace(PRIVATE_KEY_BLOCK_RE, mask('[REDACTED_PRIVATE_KEY]'))
+      .replace(BEARER_RE, mask('Bearer [REDACTED]'))
+      .replace(JWT_RE, mask('[REDACTED_TOKEN]'))
+      .replace(KEY_PREFIX_RE, mask('[REDACTED_KEY]'))
+      .replace(QUERY_TOKEN_RE, (_m, label: string) => {
+        redactions += 1;
+        return `${label}[REDACTED]`;
+      })
+      .replace(LABELLED_SECRET_RE, maskValue)
+      .replace(SPOKEN_SECRET_RE, maskValue)
+      .replace(CARD_CANDIDATE_RE, (m) => {
+        const digits = m.replace(/[ -]/g, '');
+        if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return m;
+        redactions += 1;
+        return '[REDACTED_CARD]';
+      });
+    return { text, redactions };
+  } catch {
+    return { text: '[unavailable]', redactions: 0 };
+  }
+}

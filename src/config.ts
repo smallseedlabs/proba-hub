@@ -96,6 +96,12 @@ export const config = {
     relayEnabled: envBool('AUDIT_RELAY_ENABLED', process.env.NODE_ENV !== 'test'),
     /** Redis stream the audit-consumer reads. Same default as proba-audit (EVENT_BUS_AUDIT_TOPIC). */
     stream: process.env.AUDIT_STREAM || 'proba.audit.events',
+    /**
+     * Put the raw text of messages, replies and explanations on audit events (AuditEvent.content),
+     * secrets masked. Off by default: turn it on where people are meant to read the conversation
+     * in the audit portal. Length fields stay in `details` either way.
+     */
+    contentEnabled: envBool('AUDIT_CONTENT_ENABLED', false),
     /** Workspace stamped on events when none is known (the Hub does not model workspaces yet). */
     workspaceId: process.env.AUDIT_WORKSPACE_ID || DEFAULT_WORKSPACE_ID,
     /** `service` field of emitted events. */

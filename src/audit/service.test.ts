@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AUDIT_ACTION_INFO, type AuditActionName as CatalogActionName } from '@smallseedlabs/proba-protocol/audit';
 import { validateAuditEvent } from './vendor/proba-audit/index.js';
+import { AUDIT_CONTENT_MAX_CHARS } from '@smallseedlabs/proba-protocol/audit';
 import { createHubAudit, type AuditActionName, type DeprecatedAuditAction } from './service.js';
 import { newTraceContext, runWithTrace, setTraceUser, bindTraceId, startSpan } from './trace.js';
 import { MemoryOutbox, captureLogger, fixedClock, sequentialIds } from './test-support.js';
@@ -192,5 +193,73 @@ describe('HubAudit.emit', () => {
     await audit.emit({ action: 'command.processed', outcome: 'success', durationMs: 12.7 });
     await audit.emit({ action: 'command.processed', outcome: 'success', durationMs: -5 });
     expect(outbox.events.map((e) => e.durationMs)).toEqual([13, 0]);
+  });
+});
+
+describe('HubAudit.emit with content (AUDIT_CONTENT_ENABLED)', () => {
+  const draft = { action: 'thread.message_received' as const, outcome: 'success' as const };
+
+  it('does not write content when the flag is off (the default), whatever the draft says', async () => {
+    const { audit, outbox } = setup({ contentEnabled: false });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, details: { textLength: 5 }, content: { kind: 'user_message', text: 'hello' } });
+    });
+    expect(outbox.events[0].content).toBeUndefined();
+    expect(outbox.events[0].details).toEqual({ textLength: 5 });
+  });
+
+  it('writes content with the text as written, flags and counts, and a valid event', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, content: { kind: 'user_message', text: 'Mail jane@example.com about the spring campaign' } });
+    });
+    const [event] = outbox.events;
+    expect(validateAuditEvent(event).success).toBe(true);
+    expect(event.content).toEqual({
+      kind: 'user_message',
+      text: 'Mail jane@example.com about the spring campaign',
+      truncated: false,
+      originalLength: 'Mail jane@example.com about the spring campaign'.length,
+      redactions: 0,
+    });
+  });
+
+  it('masks secrets in the text and counts them', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, content: { kind: 'user_message', text: 'password: hunter2 and card 4111 1111 1111 1111, Bearer abc.def' } });
+    });
+    const content = outbox.events[0].content!;
+    expect(content.text).toBe('password: [REDACTED] and card [REDACTED_CARD], Bearer [REDACTED]');
+    expect(content.redactions).toBe(3);
+    expect(JSON.stringify(outbox.events[0])).not.toMatch(/hunter2|4111|abc\.def/);
+  });
+
+  it('truncates long text at the protocol maximum and flags it', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true });
+    const text = 'a'.repeat(AUDIT_CONTENT_MAX_CHARS + 10);
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ action: 'brain.reply_generated', outcome: 'success', content: { kind: 'brain_reply', text } });
+    });
+    const content = outbox.events[0].content!;
+    expect(content.text).toHaveLength(AUDIT_CONTENT_MAX_CHARS);
+    expect(content).toMatchObject({ truncated: true, originalLength: AUDIT_CONTENT_MAX_CHARS + 10 });
+    expect(validateAuditEvent(outbox.events[0]).success).toBe(true);
+  });
+
+  it('skips empty text', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, content: { kind: 'user_message', text: '' } });
+    });
+    expect(outbox.events[0].content).toBeUndefined();
+  });
+
+  it('never puts text in details or in the error message path', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, details: { textLength: 9 }, content: { kind: 'user_message', text: 'sensitive?' } });
+    });
+    expect(JSON.stringify(outbox.events[0].details)).not.toContain('sensitive');
   });
 });
