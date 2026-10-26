@@ -1,16 +1,8 @@
 import { pool } from '../db/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { redisClient } from '../services/redis.js';
-import {
-  OutboxRelay,
-  PostgresOutboxStore,
-  RedisStreamsPublisher,
-  type Clock,
-  type EventBus,
-  type OutboxStore,
-  type StreamsClient,
-} from './vendor/proba-audit/index.js';
+import { createAuditPublisher } from './publisher.js';
+import { OutboxRelay, PostgresOutboxStore, type Clock, type EventBus, type OutboxStore } from './vendor/proba-audit/index.js';
 import { systemClock, toAuditLogger } from './runtime.js';
 
 export interface AuditRelayDeps {
@@ -21,8 +13,8 @@ export interface AuditRelayDeps {
 }
 
 /**
- * The audit relay: claims rows of `audit_outbox` and publishes them to the Redis
- * Stream the audit-consumer reads. It is separate from the Hub's SSE relay
+ * The audit relay: claims rows of `audit_outbox` and publishes them through the
+ * audit publisher port (`AUDIT_PUBLISHER`; Redis Stream the audit-consumer reads by default). It is separate from the Hub's SSE relay
  * (`outbox` table, pub/sub channel `proba:events`), which it never touches.
  */
 export function createAuditRelay(deps: AuditRelayDeps = {}): OutboxRelay {
@@ -31,10 +23,10 @@ export function createAuditRelay(deps: AuditRelayDeps = {}): OutboxRelay {
     outbox: deps.outbox ?? new PostgresOutboxStore({ pool }),
     bus:
       deps.bus ??
-      new RedisStreamsPublisher({
-        client: redisClient as unknown as StreamsClient,
+      createAuditPublisher(config.audit.publisher, {
         clock,
-        ...(config.audit.maxStreamLength > 0 ? { maxStreamLength: config.audit.maxStreamLength } : {}),
+        logger: logger.child({ component: 'audit-publisher' }),
+        maxStreamLength: config.audit.maxStreamLength,
       }),
     topic: deps.topic ?? config.audit.stream,
     logger: toAuditLogger(logger.child({ component: 'audit-relay' })),

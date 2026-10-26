@@ -22,6 +22,7 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "validate:scenarios": "tsx scripts/validate-scenarios.ts",
+    "check:vendored-audit": "node scripts/check-vendored-audit.mjs",
     "docker:build": "docker build -t proba-hub:latest .",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",

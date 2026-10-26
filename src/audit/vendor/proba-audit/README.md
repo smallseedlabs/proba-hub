@@ -19,3 +19,12 @@ without publishing packages. Do not add Hub logic here; Hub code lives in
 The interfaces (`AuditEmitter`, `OutboxStore`) are unchanged, so this directory can
 later be replaced by `@smallseedlabs/proba-audit-core` / `-adapters` imports without
 touching Hub code.
+
+## Keeping the copy honest
+
+`UPSTREAM_COMMIT` pins the proba-audit commit this copy comes from. CI checks that commit out and runs
+`scripts/check-vendored-audit.mjs`, which fails when a vendored file differs from upstream beyond the edits
+listed in the script (import paths, the header line, the parts the Hub drops), when a reduced file (the
+publish half of the event bus and the Redis publisher) no longer contains the upstream blocks it must keep,
+or when a file appears that the script does not list. To update the copy: re-copy from the new commit,
+change `UPSTREAM_COMMIT`, the header lines and the commit above, then run the script until it passes.

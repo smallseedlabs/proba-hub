@@ -17,6 +17,17 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/** Adapters for the audit publisher port (`src/audit/publisher.ts`). The first is the default. */
+export const AUDIT_PUBLISHERS = ['redis', 'log'] as const;
+export type AuditPublisherKind = (typeof AUDIT_PUBLISHERS)[number];
+
+function envAuditPublisher(): AuditPublisherKind {
+  const raw = process.env.AUDIT_PUBLISHER?.trim().toLowerCase();
+  if (!raw) return 'redis';
+  if ((AUDIT_PUBLISHERS as readonly string[]).includes(raw)) return raw as AuditPublisherKind;
+  throw new Error(`AUDIT_PUBLISHER must be one of ${AUDIT_PUBLISHERS.join(', ')} (got "${raw}")`);
+}
+
 export const config = {
   env: process.env.NODE_ENV || 'development',
   isDevelopment: process.env.NODE_ENV !== 'production',
@@ -94,7 +105,12 @@ export const config = {
      * Default: on, except under NODE_ENV=test so test suites control the relay.
      */
     relayEnabled: envBool('AUDIT_RELAY_ENABLED', process.env.NODE_ENV !== 'test'),
-    /** Redis stream the audit-consumer reads. Same default as proba-audit (EVENT_BUS_AUDIT_TOPIC). */
+    /**
+     * Where the relay publishes audit events: `redis` (default; the Redis Stream the audit-consumer
+     * reads) or `log` (writes event ids to the Hub log only; no broker, for local diagnostics).
+     */
+    publisher: envAuditPublisher(),
+    /** Redis stream the audit-consumer reads (used by the `redis` publisher). Same default as proba-audit (EVENT_BUS_AUDIT_TOPIC). */
     stream: process.env.AUDIT_STREAM || 'proba.audit.events',
     /**
      * Put the raw text of messages, replies and explanations on audit events (AuditEvent.content),
