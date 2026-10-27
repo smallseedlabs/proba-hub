@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `docker-compose.yml`: every published port is bound to `127.0.0.1`; no password has a default (`POSTGRES_PASSWORD`,
+  `REDIS_PASSWORD`, `JWT_SECRET` are `${NAME:?...}`); Redis runs with an ACL user and password (no anonymous access) and AOF.
+  `scripts/generate-local-env.sh` writes a local `.env` with random values. **Breaking for local setups**: run it (and
+  `docker compose down -v` once, because the old Postgres volume holds the old password) before `docker compose up`.
+- CI job `Compose security` (`scripts/check-compose-security.mjs`) fails on a non-loopback port, a default or literal password,
+  or a required variable that is not really required.
+- `NODE_ENV=production`: the Hub refuses to start when `REDIS_URL` has no password (`RedisPasswordRequiredError`); `rediss://` (TLS) is supported.
+- `deploy/stack.yml`: Redis with an ACL user and password.
+- `.github/rulesets/main.json` and `docs/BRANCH_PROTECTION.md`: branch protection for `main` (to be applied by a repository admin).
+
 ### Added
 
 - Audit publisher port: the audit relay publishes through the publish half of proba-audit's `EventBus`, and

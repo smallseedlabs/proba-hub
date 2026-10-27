@@ -1,13 +1,19 @@
+# SECURITY (checked in CI by scripts/check-compose-security.mjs):
+#   * Every published port is bound to 127.0.0.1: nothing here is reachable from another machine. To expose the Hub, put a
+#     reverse proxy with TLS in front of it; do not widen the bind.
+#   * No password has a default. Each is `${NAME:?set NAME}`: compose refuses to start without it. Write a local .env with random
+#     values using `scripts/generate-local-env.sh` (never committed), or set them in your secret manager for a real deployment.
+#     Use URL-safe passwords (hex): POSTGRES_PASSWORD and REDIS_PASSWORD are placed inside URLs.
 services:
   postgres:
     image: postgres:16-alpine
     container_name: proba-hub-postgres
     environment:
       POSTGRES_USER: proba
-      POSTGRES_PASSWORD: proba
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: proba_hub
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,12 +25,26 @@ services:
   redis:
     image: redis:7-alpine
     container_name: proba-hub-redis
+    environment:
+      REDIS_USER: ${REDIS_USER:-proba}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    # An ACL user with a password; the `default` user (no password) is switched off. The ACL file is written at start from the
+    # environment so the password never appears in the process arguments. The user may do everything except the @dangerous
+    # commands (FLUSHALL, FLUSHDB, KEYS, CONFIG, DEBUG, SHUTDOWN, ...), which the Hub never needs.
+    # AOF persistence ON: the audit stream (relayed from audit_outbox) must survive a Redis restart.
+    command:
+      - sh
+      - -c
+      - >-
+        umask 077 &&
+        printf 'user default off\nuser %s on >%s ~* &* +@all -@dangerous\n' "$$REDIS_USER" "$$REDIS_PASSWORD" > /tmp/users.acl &&
+        exec redis-server --aclfile /tmp/users.acl --appendonly yes --appendfsync everysec
     ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user "$$REDIS_USER" ping | grep -q PONG']
       interval: 10s
       timeout: 3s
       retries: 5
@@ -44,7 +64,7 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://proba:proba@postgres:5432/proba_hub
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/proba_hub
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (a unique random value) to run the production image}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: "no"
@@ -66,18 +86,19 @@ services:
       NODE_ENV: production
       PORT: 3000
       HOST: 0.0.0.0
-      DATABASE_URL: postgresql://proba:proba@postgres:5432/proba_hub
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://proba:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/proba_hub
+      # An ACL user and password, never anonymous. Use rediss:// (TLS) for a Redis outside this compose network.
+      REDIS_URL: redis://${REDIS_USER:-proba}:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (a unique random value) to run the production image}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MOCK_BRAIN_SCENARIO: ${MOCK_BRAIN_SCENARIO:-happy_path}
     ports:
-      - "${HUB_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${HUB_HOST_PORT:-3000}:3000"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -86,7 +86,7 @@ cp .env.example .env
 Key variables:
 
 - `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string
+- `REDIS_URL`: Redis connection string with credentials: `redis://<user>:<password>@host:6379`, or `rediss://...` for TLS (certificate verified). With `NODE_ENV=production` the Hub refuses to start when it carries no password. `POSTGRES_PASSWORD`, `REDIS_USER` and `REDIS_PASSWORD` are read by `docker-compose.yml` only
 - `FIREBASE_PROJECT_ID`: Firebase project whose ID tokens are accepted for sign-in
 - `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
@@ -97,10 +97,17 @@ Key variables:
 
 The easiest way to run the full stack:
 
-```bash
-# JWT_SECRET is required: the production image refuses a missing/dev-default secret
-export JWT_SECRET="$(openssl rand -base64 48)"
+Nothing in `docker-compose.yml` has a default password, and every published port is bound to `127.0.0.1` (CI checks both with
+`scripts/check-compose-security.mjs`). Generate a local `.env` with random secrets first (it is gitignored; compose reads it):
 
+```bash
+scripts/generate-local-env.sh     # JWT_SECRET, POSTGRES_PASSWORD, REDIS_PASSWORD, plus DATABASE_URL / REDIS_URL for host-side use
+```
+
+Redis runs with an ACL user and a password (no anonymous access) and AOF persistence. To reach the Hub from another machine,
+put a reverse proxy with TLS in front of it; do not widen the port bind.
+
+```bash
 # Start all services (postgres + redis, then the one-shot `migrate` job, then hub)
 docker compose up -d
 
@@ -142,6 +149,8 @@ ports (and point `DATABASE_URL`/`REDIS_URL` in your `.env` at them):
 POSTGRES_HOST_PORT=55432 REDIS_HOST_PORT=56379 docker compose up -d postgres redis
 ```
 
+`scripts/generate-local-env.sh` writes `DATABASE_URL` / `REDIS_URL` for the default ports; edit them if you override these.
+
 ### Running the integration tests locally
 
 Integration tests run against real Postgres and Redis (never point them at a
@@ -150,8 +159,9 @@ database you care about: they `TRUNCATE` tables).
 ```bash
 docker compose up -d postgres redis
 docker compose exec postgres psql -U proba -d proba_hub -c "CREATE DATABASE proba_hub_test"
-export DATABASE_URL=postgresql://proba:proba@localhost:5432/proba_hub_test
-export REDIS_URL=redis://localhost:6379
+# .env (scripts/generate-local-env.sh) holds the passwords; point the tests at the test database
+set -a; . ./.env; set +a
+export DATABASE_URL=postgresql://proba:${POSTGRES_PASSWORD}@localhost:5432/proba_hub_test
 npm run migrate
 npm run test:integration       # or test:integration:ci (fails on any skipped test)
 ```
@@ -546,6 +556,10 @@ Deploy with the provided stack file:
 echo "your-postgres-password" | docker secret create postgres_password -
 echo "your-jwt-secret" | docker secret create jwt_secret -
 
+# Passwords the stack file interpolates (URL-safe values, e.g. `openssl rand -hex 24`)
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"   # same value as the postgres_password secret
+export REDIS_PASSWORD="$(openssl rand -hex 24)"
+
 # Deploy stack
 docker stack deploy -c deploy/stack.yml proba
 
@@ -570,6 +584,12 @@ The stack runs 3 replicas of the Hub with shared Postgres and Redis, plus a one-
 - Every replica runs an audit relay by default. That is safe (rows are claimed with `SKIP LOCKED`) but
   stream order between batches of different replicas is not strictly the outbox order. Set
   `AUDIT_RELAY_ENABLED=false` on all but one replica if strict order matters to the consumer.
+
+Redis in the stack runs with an ACL user (`REDIS_USER`, default `proba`) and `REDIS_PASSWORD`, and is not published. Swarm cannot bind a
+published port to one address, so `3000` is reachable on every node address: put a TLS reverse proxy or a firewall rule in front.
+
+Branch protection for `main` (required pull requests and checks, no force push) is defined in `.github/rulesets/main.json`; see
+[docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) for how to apply it.
 
 ### Environment-Specific Configs
 

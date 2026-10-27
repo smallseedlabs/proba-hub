@@ -1,6 +1,11 @@
 import { createClient } from 'redis';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { assertRedisUrl } from './redis-url.js';
+
+// Throws at startup (before any connection) when the URL is invalid or, with NODE_ENV=production, has no password.
+// Checked here rather than in config.ts so one-shot jobs that never touch Redis (migrate) do not need it.
+assertRedisUrl(config.redis.url, config.isProduction);
 
 export const redisClient = createClient({
   url: config.redis.url,
