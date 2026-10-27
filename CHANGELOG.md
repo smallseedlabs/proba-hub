@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pause and emergency stop now halt the workspace: `control` persists `running` / `paused` / `stopped`
+  (migration `005_execution_state.sql`) and every other command is refused before the brain until `resume`
+  (`error` event `execution_paused` / `execution_stopped`, audit `command.rejected` denied). The `status` event gains `executionState`;
+  `control.*` audit events now have `details.scope: workspace` and target the workspace.
+- Typed messages (`send_message`) are stored in `messages` with `source: user`.
+- Budget enforcement: declining a costed ask no longer launches; brain tool calls are dropped, the goal is paused, and
+  `goal.budget_declined` / `budget.evaluated` carry `enforced: true`. `happy_path` and `approval_edit` have a decline branch.
+  An `edit` answer is no longer audited as a declined budget.
+- DeepSeek brain adapter behind the brain port, selected by `BRAIN_PROVIDER=mock|deepseek` (`mock` stays the default),
+  with spend, plan budget and tool limits from configuration.
 - Audit publisher port: the audit relay publishes through the publish half of proba-audit's `EventBus`, and
   `AUDIT_PUBLISHER` picks the adapter (`redis` default, `log`). Redis is loaded only when chosen. An unknown
   value fails at startup.

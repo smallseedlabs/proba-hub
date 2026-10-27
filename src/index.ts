@@ -65,7 +65,8 @@ try {
           env: config.env,
           auditRelayEnabled: config.audit.relayEnabled,
           auditStream: config.audit.stream,
-          brainScenario: config.brain.scenario,
+          brainProvider: config.brain.provider,
+          brainScenario: config.brain.provider === 'mock' ? config.brain.scenario : undefined,
         },
       },
       { bestEffort: true }

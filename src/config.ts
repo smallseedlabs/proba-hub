@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { config as loadEnv } from 'dotenv';
 import { resolveJwtSecret } from './auth/jwt-secret.js';
 
@@ -26,6 +27,35 @@ function envAuditPublisher(): AuditPublisherKind {
   if (!raw) return 'redis';
   if ((AUDIT_PUBLISHERS as readonly string[]).includes(raw)) return raw as AuditPublisherKind;
   throw new Error(`AUDIT_PUBLISHER must be one of ${AUDIT_PUBLISHERS.join(', ')} (got "${raw}")`);
+}
+
+/** Brains behind the BrainPort (`src/brain/port.ts`). The first is the default. */
+export const BRAIN_PROVIDERS = ['mock', 'deepseek'] as const;
+export type BrainProviderKind = (typeof BRAIN_PROVIDERS)[number];
+
+function envBrainProvider(): BrainProviderKind {
+  const raw = process.env.BRAIN_PROVIDER?.trim().toLowerCase();
+  if (!raw) return 'mock';
+  if ((BRAIN_PROVIDERS as readonly string[]).includes(raw)) return raw as BrainProviderKind;
+  throw new Error(`BRAIN_PROVIDER must be one of ${BRAIN_PROVIDERS.join(', ')} (got "${raw}")`);
+}
+
+function envNumber(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return process.env[name]?.trim() && Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/** A secret from `<NAME>_FILE` (a mounted secret) or `<NAME>`; the file wins. Never logged. */
+function envSecret(name: string): string {
+  const filePath = process.env[`${name}_FILE`]?.trim();
+  if (filePath) {
+    try {
+      return readFileSync(filePath, 'utf8').trim();
+    } catch (err) {
+      throw new Error(`${name}_FILE is set but could not be read (${filePath}): ${(err as Error).message}`);
+    }
+  }
+  return (process.env[name] ?? '').trim();
 }
 
 export const config = {
@@ -93,7 +123,37 @@ export const config = {
   },
   
   brain: {
+    /** `mock` (default; scripted YAML scenarios) or `deepseek` (DeepSeek chat completions). */
+    provider: envBrainProvider(),
     scenario: process.env.MOCK_BRAIN_SCENARIO || 'happy_path',
+    deepseek: {
+      /** DEEPSEEK_API_KEY_FILE wins over DEEPSEEK_API_KEY. Required when BRAIN_PROVIDER=deepseek. */
+      apiKey: envSecret('DEEPSEEK_API_KEY'),
+      baseUrl: (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').trim().replace(/\/+$/, ''),
+      model: (process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim(),
+      timeoutMs: envInt('DEEPSEEK_TIMEOUT_MS', 30000),
+    },
+    /**
+     * Limits the Hub puts on what a model-backed brain may propose. Spend and budget are in USD
+     * (0 = no cap); an over-limit proposal is replaced by a short explanation, never passed on.
+     */
+    limits: {
+      /** Cap on the tokens of one model answer. */
+      maxOutputTokens: envInt('BRAIN_MAX_OUTPUT_TOKENS', 1500),
+      /** Tool calls kept from one answer; the rest are dropped. */
+      maxToolCallsPerTurn: envInt('BRAIN_MAX_TOOL_CALLS', 2),
+      /** Spend one tool call may propose (costImpact.proposed). */
+      maxActionSpend: envNumber('BRAIN_MAX_ACTION_SPEND', 1000),
+      /** Total cost one plan may carry (plan totalCost). */
+      maxPlanBudget: envNumber('BRAIN_MAX_PLAN_BUDGET', 10000),
+      /** Comma-separated tool names the brain may propose. Empty = any name (every call still needs approval). */
+      allowedTools: (process.env.BRAIN_ALLOWED_TOOLS || '')
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
+      /** Past messages sent to the model with each request. */
+      maxContextMessages: envInt('BRAIN_MAX_CONTEXT_MESSAGES', 20),
+    },
   },
   
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */
@@ -119,6 +179,11 @@ export const config = {
      * in the audit portal. Length fields stay in `details` either way.
      */
     contentEnabled: envBool('AUDIT_CONTENT_ENABLED', false),
+    /**
+     * When content is enabled, also mask emails, phone numbers and IBANs in `AuditEvent.content`
+     * (secrets and cards are always masked). Default on: turn off only for diagnostics.
+     */
+    contentMaskPii: envBool('AUDIT_CONTENT_MASK_PII', true),
     /** Workspace stamped on events when none is known (the Hub does not model workspaces yet). */
     workspaceId: process.env.AUDIT_WORKSPACE_ID || DEFAULT_WORKSPACE_ID,
     /** `service` field of emitted events. */

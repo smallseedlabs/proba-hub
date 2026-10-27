@@ -97,12 +97,12 @@ export function redactDetails(details: unknown, options: RedactOptions = {}): Re
 }
 
 // ---------------------------------------------------------------------------
-// Raw text (AuditEvent.content): "mask secrets only".
+// Raw text (AuditEvent.content): secrets always; personal data when AUDIT_CONTENT_MASK_PII.
 //
-// `content` carries what a person or the brain said, so ordinary text (names, emails, plans,
-// numbers) stays as written. Only things that must never be stored are masked: passwords,
-// tokens, API keys, private keys and payment card numbers. Better to mask a harmless word
-// that looks like a secret than to keep a real one.
+// Secrets (passwords, tokens, API keys, private keys, payment cards) are always masked.
+// When `pii` is true (AUDIT_CONTENT_MASK_PII, default on), emails, phone numbers and IBANs
+// are masked the same way memory does with REDACT_PII. Better to mask a harmless match
+// than to keep a real secret or identifier.
 // ---------------------------------------------------------------------------
 
 const PRIVATE_KEY_BLOCK_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
@@ -133,15 +133,38 @@ function luhnValid(digits: string): boolean {
 
 export interface MaskedText {
   text: string;
-  /** How many secrets were masked. */
+  /** How many secrets (and, when enabled, PII) were masked. */
   redactions: number;
 }
 
+export interface MaskContentOptions {
+  /** Also mask emails, phone numbers and IBANs (AUDIT_CONTENT_MASK_PII). */
+  pii?: boolean;
+}
+
+const EMAIL_CONTENT_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
+const IBAN_RE = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b/g;
+const PHONE_RE =
+  /(?<![\w.])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?|\d{2,4}[\s.-])\d{3,4}[\s.-]?\d{3,4}(?!\w|\.\d)/g;
+
+function ibanValid(raw: string): boolean {
+  const iban = raw.replace(/\s+/g, '').toUpperCase();
+  if (iban.length < 15 || iban.length > 34) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const code = ch.charCodeAt(0);
+    const value = code >= 65 && code <= 90 ? String(code - 55) : ch;
+    for (const d of value) remainder = (remainder * 10 + (d.charCodeAt(0) - 48)) % 97;
+  }
+  return remainder === 1;
+}
+
 /**
- * Mask secrets in free text and keep everything else as written. Never throws; non-strings
+ * Mask secrets in free text (and personal data when `pii` is true). Never throws; non-strings
  * give an empty text. Length is not capped here (buildAuditContent truncates).
  */
-export function maskSecretsInText(value: unknown): MaskedText {
+export function maskSecretsInText(value: unknown, options: MaskContentOptions = {}): MaskedText {
   if (typeof value !== 'string') return { text: '', redactions: 0 };
   let redactions = 0;
   const mask = (replacement: string) => () => {
@@ -153,7 +176,7 @@ export function maskSecretsInText(value: unknown): MaskedText {
     return `${label}[REDACTED]`;
   };
   try {
-    const text = value
+    let text = value
       .replace(PRIVATE_KEY_BLOCK_RE, mask('[REDACTED_PRIVATE_KEY]'))
       .replace(BEARER_RE, mask('Bearer [REDACTED]'))
       .replace(JWT_RE, mask('[REDACTED_TOKEN]'))
@@ -170,6 +193,21 @@ export function maskSecretsInText(value: unknown): MaskedText {
         redactions += 1;
         return '[REDACTED_CARD]';
       });
+    if (options.pii) {
+      text = text
+        .replace(EMAIL_CONTENT_RE, mask('[REDACTED:email]'))
+        .replace(IBAN_RE, (m) => {
+          if (!ibanValid(m)) return m;
+          redactions += 1;
+          return '[REDACTED:iban]';
+        })
+        .replace(PHONE_RE, (m) => {
+          const digits = m.replace(/\D/g, '');
+          if (digits.length < 9 || digits.length > 15 || /^\d{4}-\d{2}-\d{2}$/.test(m.trim())) return m;
+          redactions += 1;
+          return '[REDACTED:phone]';
+        });
+    }
     return { text, redactions };
   } catch {
     return { text: '[unavailable]', redactions: 0 };

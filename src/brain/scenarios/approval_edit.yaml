@@ -53,6 +53,17 @@ steps:
           current: 100
           proposed: 120
 
+  # Decline branch: a declined budget does not launch.
+  - trigger:
+      type: answer_ask
+      askType: action_approval
+      choice: reject
+    goal:
+      status: paused
+    outputs:
+      - type: reply
+        text: Understood. The budget change was declined, so the campaign will not launch. Tell me what budget would work and I will propose it again.
+
   - trigger:
       type: answer_ask
       askType: action_approval

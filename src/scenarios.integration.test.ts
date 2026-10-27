@@ -374,7 +374,7 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       expect(statusEvent.payload.state).toBe('resume');
     });
 
-    it('should handle kill control', async () => {
+    it('should handle kill control (and stay stopped until resume)', async () => {
       await sendCommand({
         kind: 'command',
         clientMsgId: randomUUID(),
@@ -390,6 +390,9 @@ describe('Mock Brain Scenarios Integration Tests', () => {
       const statusEvent = events.find((e: any) => e.type === 'status');
       expect(statusEvent, 'Should have status event').toBeDefined();
       expect(statusEvent.payload.state).toBe('kill');
+      expect(statusEvent.payload.executionState).toBe('stopped');
+      // The stop is persisted for the workspace; lift it so the scenarios after this one can run.
+      await pool.query('DELETE FROM execution_state WHERE user_id = $1', [userId]);
     });
   });
 

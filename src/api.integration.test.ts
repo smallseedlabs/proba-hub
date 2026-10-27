@@ -256,13 +256,13 @@ describe('API Integration Tests', () => {
           postCommand(
             concurrencyApp,
             user.token,
-            i % 2 === 0 ? controlCommand(user.threadId, 'pause') : createGoalCommand(user.threadId, `Goal ${i}`)
+            i % 2 === 0 ? controlCommand(user.threadId, 'resume') : createGoalCommand(user.threadId, `Goal ${i}`)
           )
         )
       );
       expect(responses.every(r => r.statusCode === 202 && r.body.status === 'accepted')).toBe(true);
 
-      // control -> 1 status event; create_goal -> brain output + goal_updated.
+      // control (resume: it never gates the create_goal commands racing it) -> 1 status event; create_goal -> brain output + goal_updated.
       const total = N / 2 + 2 * (N / 2);
       const events = await waitForEvents(concurrencyApp, user.token, evs => evs.length >= total, { timeout: 10000 });
       expect(events.map(e => e.seq)).toEqual(range(1, total));

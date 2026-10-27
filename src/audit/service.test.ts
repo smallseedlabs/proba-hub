@@ -208,8 +208,8 @@ describe('HubAudit.emit with content (AUDIT_CONTENT_ENABLED)', () => {
     expect(outbox.events[0].details).toEqual({ textLength: 5 });
   });
 
-  it('writes content with the text as written, flags and counts, and a valid event', async () => {
-    const { audit, outbox } = setup({ contentEnabled: true });
+  it('writes content with plain text when PII masking is off', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true, contentMaskPii: false });
     await runWithTrace(newTraceContext(UUID), async () => {
       await audit.emit({ ...draft, content: { kind: 'user_message', text: 'Mail jane@example.com about the spring campaign' } });
     });
@@ -224,8 +224,22 @@ describe('HubAudit.emit with content (AUDIT_CONTENT_ENABLED)', () => {
     });
   });
 
-  it('masks secrets in the text and counts them', async () => {
+  it('masks emails in content when AUDIT_CONTENT_MASK_PII is on (the default)', async () => {
     const { audit, outbox } = setup({ contentEnabled: true });
+    await runWithTrace(newTraceContext(UUID), async () => {
+      await audit.emit({ ...draft, content: { kind: 'user_message', text: 'Mail jane@example.com about the spring campaign' } });
+    });
+    expect(outbox.events[0].content).toEqual({
+      kind: 'user_message',
+      text: 'Mail [REDACTED:email] about the spring campaign',
+      truncated: false,
+      originalLength: 'Mail jane@example.com about the spring campaign'.length,
+      redactions: 1,
+    });
+  });
+
+  it('masks secrets in the text and counts them', async () => {
+    const { audit, outbox } = setup({ contentEnabled: true, contentMaskPii: false });
     await runWithTrace(newTraceContext(UUID), async () => {
       await audit.emit({ ...draft, content: { kind: 'user_message', text: 'password: hunter2 and card 4111 1111 1111 1111, Bearer abc.def' } });
     });
