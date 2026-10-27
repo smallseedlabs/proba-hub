@@ -120,6 +120,8 @@ export interface HubAuditDeps {
   enabled?: boolean;
   /** Write AuditEvent.content (default: config.audit.contentEnabled). */
   contentEnabled?: boolean;
+  /** Mask emails / phones / IBANs in content (default: config.audit.contentMaskPii). */
+  contentMaskPii?: boolean;
   service?: string;
   defaultWorkspaceId?: string;
   clock?: Clock;
@@ -130,6 +132,7 @@ export interface HubAuditDeps {
 export function createHubAudit(deps: HubAuditDeps): HubAudit {
   const enabled = deps.enabled ?? config.audit.enabled;
   const contentEnabled = deps.contentEnabled ?? config.audit.contentEnabled;
+  const contentMaskPii = deps.contentMaskPii ?? config.audit.contentMaskPii;
   const log = deps.logger ?? toAuditLogger(logger);
   const emitter: AuditEmitter = createOutboxAuditEmitter<PgQueryable>({
     outbox: deps.outbox,
@@ -188,7 +191,7 @@ export function createHubAudit(deps: HubAuditDeps): HubAudit {
             details: redactDetails(details),
             ...(contentEnabled && draft.content && draft.content.text.length > 0
               ? (() => {
-                  const masked = maskSecretsInText(draft.content.text);
+                  const masked = maskSecretsInText(draft.content.text, { pii: contentMaskPii });
                   return { content: buildAuditContent(draft.content.kind, masked.text, { redactions: masked.redactions }) };
                 })()
               : {}),

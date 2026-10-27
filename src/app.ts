@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { createServer } from './server.js';
-import { config } from './config.js';
+import { config, type BrainProviderKind } from './config.js';
 import { authRoutes, devAuthRoutes } from './routes/auth.js';
 import { createFirebaseTokenVerifier, type FirebaseTokenVerifier } from './auth/firebase.js';
 import { logger } from './logger.js';
@@ -11,13 +11,15 @@ import { startOutboxRelay, stopOutboxRelay } from './services/outbox-relay.js';
 import { startAuditRelay, stopAuditRelay } from './audit/relay.js';
 import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
-import { MockBrain } from './brain/mock-brain.js';
+import { createBrain } from './brain/factory.js';
 import type { BrainPort } from './types.js';
 
 export interface AppOptions {
   /** Start outbox relay + ask expiry jobs (default true). */
   startBackgroundJobs?: boolean;
-  /** Mock brain scenario name. Defaults to config.brain.scenario (MOCK_BRAIN_SCENARIO). */
+  /** Brain provider. Defaults to config.brain.provider (BRAIN_PROVIDER); naming a brainScenario alone selects `mock`. */
+  brainProvider?: BrainProviderKind;
+  /** Scripted scenario name for the `mock` provider. Defaults to config.brain.scenario (MOCK_BRAIN_SCENARIO). */
   brainScenario?: string;
   /** Inject a brain implementation directly (takes precedence over brainScenario). */
   brain?: BrainPort;
@@ -44,7 +46,12 @@ export interface AppOptions {
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const fastify = await createServer();
 
-  const brain = options.brain ?? new MockBrain(options.brainScenario ?? config.brain.scenario);
+  const brain =
+    options.brain ??
+    createBrain({
+      provider: options.brainProvider ?? (options.brainScenario ? 'mock' : undefined),
+      scenario: options.brainScenario,
+    });
   const processor = new CommandProcessor(brain);
 
   if (!config.isProduction && (options.devLogin ?? config.auth.devLoginEnabled)) {

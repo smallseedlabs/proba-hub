@@ -125,7 +125,7 @@ describe('SSE Integration Tests', () => {
         expect(msg.event).toBe('status');
         const envelope = JSON.parse(msg.data);
         expect(envelope).toMatchObject({ kind: 'event', type: 'status', threadId: user.threadId });
-        expect(envelope.payload).toEqual({ state: 'pause', message: 'Execution pause' });
+        expect(envelope.payload).toEqual({ state: 'pause', executionState: 'paused', message: 'Execution pause' });
         expect(typeof envelope.at).toBe('string');
       }
     });

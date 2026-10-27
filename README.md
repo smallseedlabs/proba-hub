@@ -90,8 +90,9 @@ Key variables:
 - `FIREBASE_PROJECT_ID`: Firebase project whose ID tokens are accepted for sign-in
 - `JWT_SECRET` / `JWT_SECRET_FILE`: Signs Hub session tokens. `JWT_SECRET_FILE` (e.g. a Swarm secret at `/run/secrets/jwt_secret`) takes precedence. With `NODE_ENV=production` the Hub refuses to start if neither is set or the value is the development default
 - `CORS_ORIGIN`: Allowed origin for CORS (e.g., `http://localhost:5173`)
-- `MOCK_BRAIN_SCENARIO`: Which YAML scenario to run (`happy_path`, `approval_edit`, etc.)
-- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_PUBLISHER` (`redis` default, or `log`; see [Audit trail](#audit-trail)), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events, secrets masked): see [Audit trail](#audit-trail)
+- `BRAIN_PROVIDER`: Which brain answers (`mock` default, or `deepseek`; see [Brain providers](#brain-providers)). `MOCK_BRAIN_SCENARIO`: Which YAML scenario the `mock` brain runs (`happy_path`, `approval_edit`, etc.)
+- `DEEPSEEK_API_KEY` / `DEEPSEEK_API_KEY_FILE` (required with `BRAIN_PROVIDER=deepseek`; the file wins), `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_MS`; limits `BRAIN_MAX_OUTPUT_TOKENS`, `BRAIN_MAX_TOOL_CALLS`, `BRAIN_MAX_ACTION_SPEND`, `BRAIN_MAX_PLAN_BUDGET`, `BRAIN_ALLOWED_TOOLS`, `BRAIN_MAX_CONTEXT_MESSAGES`
+- `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_PUBLISHER` (`redis` default, or `log`; see [Audit trail](#audit-trail)), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events; memory learns conversation text only when this is on), `AUDIT_CONTENT_MASK_PII` (default `true`: also mask emails, phones and IBANs in that text; secrets and cards are always masked): see [Audit trail](#audit-trail)
 
 ### Running with Docker Compose
 
@@ -413,6 +414,42 @@ curl -X POST http://localhost:3000/v1/commands \
 - `npm run migrate:prod` - Run them with the compiled entry point (`node dist/db/migrate-cli.js`, what the image and the `migrate` compose/stack job run)
 - `npm run seed` - Seed demo data
 
+### Brain providers
+
+`src/brain/port.ts` is the port the command processor talks to; `BRAIN_PROVIDER` picks the adapter (`src/brain/factory.ts`):
+
+- `mock` (default): scripted YAML scenarios, see below. Tests use it (`buildApp({ brainScenario })` always selects it).
+- `deepseek`: DeepSeek chat completions (OpenAI-compatible API). It needs `DEEPSEEK_API_KEY` (or `DEEPSEEK_API_KEY_FILE`);
+  an unknown provider or a missing key fails at startup. The model answers with protocol brain outputs as JSON; anything
+  the protocol does not accept is dropped.
+
+The Hub applies limits to what a model-backed brain proposes, from configuration (USD; `0` = no cap), whatever the model says:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `BRAIN_MAX_OUTPUT_TOKENS` | `1500` | Token cap of one model answer |
+| `BRAIN_MAX_TOOL_CALLS` | `2` | Tool calls kept per answer; the rest are dropped |
+| `BRAIN_MAX_ACTION_SPEND` | `1000` | Spend one tool call may propose (`costImpact.proposed`) |
+| `BRAIN_MAX_PLAN_BUDGET` | `10000` | Total cost one plan may carry |
+| `BRAIN_ALLOWED_TOOLS` | empty | Comma-separated tool names; empty allows any name |
+| `BRAIN_MAX_CONTEXT_MESSAGES` | `20` | Past messages sent with each request |
+
+A proposal over a limit is replaced by a short reply that says so. Every tool call is forced to `needsApproval: true`:
+the Hub never runs a tool by itself.
+
+### Pause, emergency stop and budget decisions
+
+- `control: pause` and `control: kill` (emergency stop) are persisted per workspace (the `execution_state` table; one
+  workspace per user): `running`, `paused` or `stopped`. While it is not `running`, every command except `control` is
+  refused **before the brain is called**: the command row becomes `rejected`, the client gets an `error` event
+  (`execution_paused` / `execution_stopped`) and the audit trail `command.rejected` (outcome `denied`). `control: resume`
+  runs the workspace again; a `pause` never lifts a `kill`. The status event carries `executionState` next to `state`.
+- A typed `send_message` is stored in `messages` (`source: user`) before the brain reads the thread; brain replies are
+  stored as before (`source: brain`). A refused message is not stored.
+- Declining an ask that carries a cost (`answer_ask` with `choice: reject`) is enforced: the brain's tool calls for that
+  answer are not applied, whatever progress it reports is ignored, and the goal is set to `paused` instead of launching.
+  Audited as `goal.budget_declined` and `budget.evaluated` with `enforced: true`. Editing an approval (`choice: edit`) is not a decline.
+
 ### Mock Brain Scenarios
 
 The mock brain uses YAML scenario files in `src/brain/scenarios/`:
@@ -422,6 +459,8 @@ The mock brain uses YAML scenario files in `src/brain/scenarios/`:
 - `expired_ask.yaml` - Ask expires with onExpire action
 - `clarification_loop.yaml` - Multiple clarification rounds (capped at 2)
 - `malformed_output.yaml` - Simulates brain error handling
+
+`happy_path` and `approval_edit` have a decline branch (`answer_ask` on the action approval with `choice: reject`).
 
 Set via `MOCK_BRAIN_SCENARIO` environment variable, or inject it in code/tests:
 `buildApp({ brainScenario: 'approval_edit' })`.
@@ -484,11 +523,12 @@ Hub action ──same DB transaction──> audit_outbox ──AuditRelay──>
   `brain.reply_generated` (`brain_reply`), `brain.explanation_generated` (`explanation`) and
   `brain.clarification_requested` (`brain_clarification`: the reason and the numbered questions). It is written in the same
   transaction and outbox row as the event; `details.textLength` stays. The text goes through
-  `maskSecretsInText` (`src/audit/redact.ts`), a "secrets only" mode: passwords, tokens (bearer, JWT, labelled, query
+  `maskSecretsInText` (`src/audit/redact.ts`): passwords, tokens (bearer, JWT, labelled, query
   parameters), API keys (Stripe/OpenAI-style, GitHub, Slack, Google, AWS prefixes), private key blocks and Luhn-valid card
-  numbers are replaced with `[REDACTED...]` and counted in `content.redactions`; names, emails, numbers and plans stay as
-  written. Text over 16 384 characters is truncated and flagged (`truncated`, `originalLength`). A word that merely looks
-  like a secret may be masked (better than keeping a real one). Turn it on only where the audit store's access rules
+  numbers are always replaced with `[REDACTED...]` and counted in `content.redactions`. With `AUDIT_CONTENT_MASK_PII`
+  (default `true`), emails, phone numbers and IBANs are masked too (`[REDACTED:email]` etc.); names and plans stay as
+  written. Memory learns conversation text only when `AUDIT_CONTENT_ENABLED` is on. Text over 16 384 characters is
+  truncated and flagged (`truncated`, `originalLength`). Turn it on only where the audit store's access rules
   (proba-audit: admin role only) fit the conversation's sensitivity.
 
 ### Events emitted
@@ -533,7 +573,7 @@ the data carries one (a tool's own risk, a brain decision). The generic and alia
 | `approval.requested` | approval (low) | Plan or tool call waiting for approval |
 | `approval.granted` / `approval.rejected` | approval (medium / low) | `approve_plan`, or `answer_ask` on a plan/action approval |
 | `approval.expired` | approval (low) | Ask expired (job run) |
-| `control.paused` / `control.resumed` | config (medium) | `control` command `pause` / `resume` (`details.scope`: `thread` or `workspace`) |
+| `control.paused` / `control.resumed` | config (medium) | `control` command `pause` / `resume` (`details.scope: workspace`, `previousState`, `executionState`) |
 | `control.emergency_stopped` | config (high) | `control` command `kill` (tag `emergency_stop`); the Hub's kill stops everything in scope, so it is not `control.killed` (reserved for one goal or run) |
 | `stream.connected` / `stream.disconnected` | data_access (low) | SSE stream opened / closed (`details.transport: sse`, resume position or last seq, duration; no address) |
 | `system.started` / `system.stopped` | system | Hub boot / shutdown |
@@ -542,8 +582,9 @@ the data carries one (a tool's own risk, a brain decision). The generic and alia
 
 Reads (polling `GET /v1/events?after=`, `/v1/threads`, ...) are not audited.
 
-Known limits: the Hub has no budget enforcement, so budget events are informational; pause/resume/kill
-only emit a `status` event (the mock brain does not really stop); `auth.denied` throttling is per replica.
+Known limits: the Hub enforces only a user's decline of a costed ask (`enforced: true`); a budget the brain
+proposes is informational (`enforced: false`). Pause and kill gate commands, they do not interrupt a brain call
+already running; `auth.denied` throttling is per replica.
 
 ## Deployment
 

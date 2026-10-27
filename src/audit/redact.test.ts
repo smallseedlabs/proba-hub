@@ -87,10 +87,25 @@ describe('redactDetails', () => {
   });
 });
 
-describe('maskSecretsInText (raw text of AuditEvent.content: secrets only)', () => {
-  it('keeps ordinary text exactly as written, including emails, names, numbers and punctuation', () => {
+describe('maskSecretsInText (raw text of AuditEvent.content)', () => {
+  it('keeps ordinary text including emails and phones when pii is off (default)', () => {
     const text = 'Hi Jane Doe (jane@example.com), launch the spring campaign with £1,500 daily; call +44 20 7946 0958. The token is expired, right?';
     expect(maskSecretsInText(text)).toEqual({ text, redactions: 0 });
+  });
+
+  it('masks emails, phone numbers and valid IBANs when pii is on', () => {
+    const out = maskSecretsInText(
+      'Email jane@example.com, call +44 20 7946 0958, IBAN GB82WEST12345698765432 please.',
+      { pii: true }
+    );
+    expect(out.text).toBe(
+      'Email [REDACTED:email], call [REDACTED:phone], IBAN [REDACTED:iban] please.'
+    );
+    expect(out.redactions).toBe(3);
+  });
+
+  it('does not treat dates or invalid IBANs as phone/iban when pii is on', () => {
+    expect(maskSecretsInText('Due 2026-10-26 and XX00NOTANIBAN', { pii: true }).redactions).toBe(0);
   });
 
   it('masks passwords, labelled and spoken, keeping the label', () => {

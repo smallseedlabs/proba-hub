@@ -15,6 +15,12 @@ import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
 import { toJsonb } from '../db/jsonb.js';
 import { getAudit } from '../audit/service.js';
 import { runInSpan, startSpan, type Span } from '../audit/trace.js';
+import {
+  lockExecutionState,
+  nextExecutionState,
+  saveExecutionState,
+  type ExecutionState,
+} from './execution-state.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -189,11 +195,25 @@ export class CommandProcessor {
       return { command: existingCommand!, events };
     }
 
+    // Control always goes through: it is how a paused or stopped workspace is resumed.
     if (envelope.type === 'control') {
       return this.processControl(client, userId, command, envelope, startedAt);
     }
 
+    // Pause / emergency stop: nothing else runs, and the brain is not called, until resume.
+    const executionState = await lockExecutionState(client, userId, 'share');
+    if (executionState !== 'running') {
+      return this.rejectWhileHalted(client, userId, command, scope, executionState, startedAt);
+    }
+
+    // The user's typed message joins the thread before the brain sees its context.
+    if (envelope.type === 'send_message') {
+      await this.storeUserMessage(client, envelope);
+    }
+
     const events: Event[] = [];
+    // Set when the user declined an ask that carried a cost: the budget is not approved, so nothing launches.
+    let budgetDeclined = false;
     
     // Commands with special handlers (answer_ask, approve_plan) skip initial brain invocation
     // and invoke it themselves after doing their specific work
@@ -313,10 +333,20 @@ export class CommandProcessor {
         answerPayload,
         (brainEnvelope.payload as unknown as Record<string, unknown>).askType
       );
+      budgetDeclined = await this.isBudgetDeclined(
+        client,
+        scope.threadId,
+        String(answerPayload.askId),
+        answerPayload.choice === 'reject'
+      );
       
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const { outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, brainEnvelope, context);
+      const called = await this.callBrain(client, scope, brainEnvelope, context);
+      const brainSpan = called.span;
+      const brainOutputs = budgetDeclined
+        ? await this.enforceBudgetDecline(client, scope, called.outputs, String(answerPayload.askId), brainSpan)
+        : called.outputs;
       
       for (const output of brainOutputs) {
         if (!isBrainOutput(output)) {
@@ -351,10 +381,17 @@ export class CommandProcessor {
       const planResolved = await this.resolvePlanAsk(client, userId, envelope.threadId, planPayload);
       if (planResolved) events.push(planResolved);
       await this.auditPlanDecision(client, scope, planPayload, planResolved !== null);
+      budgetDeclined =
+        typeof planPayload.planId === 'string' &&
+        (await this.isBudgetDeclined(client, scope.threadId, planPayload.planId, planPayload.approved === false));
       
       // After approving plan, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const { outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, envelope, context);
+      const called = await this.callBrain(client, scope, envelope, context);
+      const brainSpan = called.span;
+      const brainOutputs = budgetDeclined
+        ? await this.enforceBudgetDecline(client, scope, called.outputs, String(planPayload.planId), brainSpan)
+        : called.outputs;
       logger.debug({ outputCount: brainOutputs.length, outputs: brainOutputs }, 'Brain outputs after approve_plan');
       
       for (const output of brainOutputs) {
@@ -382,7 +419,9 @@ export class CommandProcessor {
     }
 
     const threadKey = envelope.threadId || 'default';
-    const goalUpdate = this.brain.takeGoalUpdate?.(threadKey);
+    const reportedUpdate = this.brain.takeGoalUpdate?.(threadKey);
+    // A declined budget does not launch: whatever progress or spend the brain reported is dropped and the goal waits.
+    const goalUpdate: BrainGoalUpdate | undefined = budgetDeclined ? { status: 'paused' } : reportedUpdate;
 
     if (envelope.type === 'create_goal') {
       const goal = await this.createGoal(client, userId, envelope.threadId!, envelope.payload as CreateGoalPayload);
@@ -602,7 +641,7 @@ export class CommandProcessor {
           tx
         );
         if (output.costImpact) {
-          // Informational: the Hub has no budget enforcement; the decision is the brain's.
+          // The proposal itself is the brain's call; the Hub enforces a user's decline (enforceBudgetDecline).
           await audit.emit(
             {
               action: 'budget.evaluated',
@@ -684,20 +723,62 @@ export class CommandProcessor {
     return { goalId: goal.rows[0]?.id, costEffect };
   }
 
+  /** Did the user decline an ask that carried a cost? Decided from the stored ask, never from audit output. */
+  private async isBudgetDeclined(
+    client: PoolClient,
+    threadId: string | undefined,
+    askId: string,
+    rejected: boolean
+  ): Promise<boolean> {
+    if (!rejected) return false;
+    const { costEffect } = await this.goalAndCostOf(client, threadId, askId);
+    return costEffect !== undefined;
+  }
+
+  /**
+   * The budget was declined, so the brain's tool calls are not applied (the brain may still acknowledge the
+   * decision). Recorded as budget.evaluated with enforced: true.
+   */
+  private async enforceBudgetDecline(
+    client: PoolClient,
+    scope: AuditScope,
+    outputs: BrainOutput[],
+    askId: string,
+    brainSpan: Span
+  ): Promise<BrainOutput[]> {
+    const kept = outputs.filter((o) => (o as { type?: unknown } | null)?.type !== 'tool_call');
+    const dropped = outputs.length - kept.length;
+    if (dropped > 0) logger.warn({ threadId: scope.threadId, askId, dropped }, 'Budget declined: brain tool calls not applied');
+    await getAudit().emit(
+      {
+        action: 'budget.evaluated',
+        outcome: 'denied',
+        userId: scope.userId,
+        threadId: scope.threadId,
+        parentSpanId: brainSpan.spanId,
+        target: { type: 'ask', id: askId.slice(0, 128) },
+        details: { decision: 'declined', enforced: true, decidedBy: 'user', droppedToolCalls: dropped },
+      },
+      { tx: client }
+    );
+    return kept;
+  }
+
   /** Audit a budget decision (goal.budget_approved / goal.budget_declined) next to the approval.* event when the ask carried a cost effect. */
   private async auditBudgetDecision(
     client: PoolClient,
     scope: AuditScope,
     askId: string,
-    approved: boolean,
+    decision: 'approved' | 'declined' | 'edited',
     askType: string,
     parentSpanId?: string
   ): Promise<void> {
     const { goalId, costEffect } = await this.goalAndCostOf(client, scope.threadId, askId);
     if (!costEffect) return;
+    const declined = decision === 'declined';
     await getAudit().emit(
       {
-        action: approved ? 'goal.budget_approved' : 'goal.budget_declined',
+        action: declined ? 'goal.budget_declined' : 'goal.budget_approved',
         outcome: 'success',
         userId: scope.userId,
         threadId: scope.threadId,
@@ -706,7 +787,9 @@ export class CommandProcessor {
         parentSpanId,
         details: {
           askType,
-          enforced: false,
+          // A declined budget is enforced: the goal does not launch (see enforceBudgetDecline).
+          enforced: declined,
+          ...(decision === 'edited' ? { edited: true } : {}),
           currentCost: typeof costEffect.current === 'number' ? costEffect.current : null,
           proposedCost: typeof costEffect.proposed === 'number' ? costEffect.proposed : null,
           currency: typeof costEffect.currency === 'string' ? costEffect.currency.slice(0, 8) : null,
@@ -738,7 +821,9 @@ export class CommandProcessor {
         },
         { tx: client }
       );
-      await this.auditBudgetDecision(client, scope, String(payload.askId), granted, type, decision?.spanId);
+      // Editing an approval adjusts the budget rather than declining it.
+      const budget = payload.choice === 'reject' ? 'declined' : payload.choice === 'edit' ? 'edited' : 'approved';
+      await this.auditBudgetDecision(client, scope, String(payload.askId), budget, type, decision?.spanId);
       return;
     }
     const { goalId } = await this.goalAndCostOf(client, scope.threadId, undefined);
@@ -774,7 +859,7 @@ export class CommandProcessor {
       { tx: client }
     );
     if (typeof payload.planId === 'string') {
-      await this.auditBudgetDecision(client, scope, payload.planId, approved, 'plan_approval', decision?.spanId);
+      await this.auditBudgetDecision(client, scope, payload.planId, approved ? 'approved' : 'declined', 'plan_approval', decision?.spanId);
     }
   }
 
@@ -783,7 +868,7 @@ export class CommandProcessor {
     scope: AuditScope,
     startedAt: number,
     events: Event[],
-    outcome: 'success' | 'failure',
+    outcome: 'success' | 'failure' | 'denied',
     errorCode?: string
   ): Promise<void> {
     await getAudit().emit(
@@ -1259,7 +1344,13 @@ export class CommandProcessor {
     startedAt: number
   ): Promise<{ command: Command; events: Event[] }> {
     const payload = envelope.payload as ControlPayload;
-    
+
+    // Persist the state before anything else, under an exclusive lock: commands already past the gate finish
+    // first, every later one sees paused/stopped until a resume.
+    const previousState = await lockExecutionState(client, userId, 'update');
+    const executionState = nextExecutionState(previousState, payload.action);
+    await saveExecutionState(client, userId, executionState, command.id);
+
     const seq = await this.getNextSeq(client, userId);
     
     const eventResult = await client.query<Event>(
@@ -1274,6 +1365,7 @@ export class CommandProcessor {
         envelope.threadId,
         toJsonb({
           state: payload.action,
+          executionState,
           message: `Execution ${payload.action}`,
         }),
       ]
@@ -1289,7 +1381,7 @@ export class CommandProcessor {
 
     // Pause / resume / emergency stop. The Hub's `kill` command stops everything in
     // its scope, so it is control.emergency_stopped (control.killed is for one goal/run).
-    // NOTE: today this only emits a status event; the mock brain does not actually stop.
+    // The scope is the whole workspace: the state is stored per user, not per thread.
     const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
     const controlAction = CONTROL_AUDIT_ACTIONS[payload.action];
     if (controlAction) {
@@ -1299,9 +1391,9 @@ export class CommandProcessor {
           outcome: 'success',
           userId,
           threadId: envelope.threadId,
-          target: { type: 'execution_state', id: envelope.threadId ?? userId },
+          target: { type: 'execution_state', id: userId },
           tags: payload.action === 'kill' ? ['emergency_stop'] : [payload.action],
-          details: { control: payload.action, scope: envelope.threadId ? 'thread' : 'workspace' },
+          details: { control: payload.action, scope: 'workspace', previousState, executionState },
         },
         { tx: client }
       );
@@ -1309,6 +1401,54 @@ export class CommandProcessor {
     await this.auditProcessed(client, scope, startedAt, [event], 'success');
 
     return { command, events: [event] };
+  }
+
+  /** The workspace is paused or stopped: the command is refused before the brain, with an error event and an audit trail. */
+  private async rejectWhileHalted(
+    client: PoolClient,
+    userId: string,
+    command: Command,
+    scope: AuditScope,
+    executionState: ExecutionState,
+    startedAt: number
+  ): Promise<{ command: Command; events: Event[] }> {
+    const code = executionState === 'stopped' ? 'execution_stopped' : 'execution_paused';
+    const message =
+      executionState === 'stopped'
+        ? 'Execution was stopped. Resume to continue.'
+        : 'Execution is paused. Resume to continue.';
+    logger.info({ userId, commandType: scope.commandType, executionState }, 'Command refused: execution halted');
+
+    const errorEvent = await this.createErrorEvent(client, userId, scope.threadId, code, message);
+    await this.addToOutbox(client, userId, errorEvent.id);
+    await client.query('UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2', ['rejected', command.id]);
+
+    const audit = getAudit();
+    await audit.emit(
+      {
+        action: 'command.rejected',
+        outcome: 'denied',
+        userId,
+        threadId: scope.threadId,
+        target: { type: 'command', id: command.id },
+        errorCode: code,
+        details: { commandType: scope.commandType, reason: code, executionState },
+      },
+      { tx: client }
+    );
+    await this.auditProcessed(client, scope, startedAt, [errorEvent], 'denied', code);
+    return { command: { ...command, status: 'rejected' }, events: [errorEvent] };
+  }
+
+  /** The text a user typed joins the thread's messages (source 'user'); brain replies are stored when they are emitted. */
+  private async storeUserMessage(client: PoolClient, envelope: CommandEnvelope): Promise<void> {
+    const text = (envelope.payload as { text?: unknown } | null)?.text;
+    if (!envelope.threadId || typeof text !== 'string') return;
+    await client.query('INSERT INTO messages (thread_id, text, source) VALUES ($1, $2, $3)', [
+      envelope.threadId,
+      text,
+      'user',
+    ]);
   }
 
   private async createErrorEvent(

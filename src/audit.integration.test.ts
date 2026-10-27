@@ -388,12 +388,15 @@ describe('rejected commands, denials and control', () => {
     expect(change('pause', 'control.paused')).toMatchObject({ category: 'config', riskLevel: 'medium', details: { control: 'pause' } });
     expect(change('resume', 'control.resumed')).toMatchObject({ category: 'config', riskLevel: 'medium', details: { control: 'resume' } });
     expect(change('kill', 'control.emergency_stopped')).toMatchObject({
-      category: 'config', riskLevel: 'high', tags: ['emergency_stop'], details: { control: 'kill', scope: 'thread' },
+      category: 'config', riskLevel: 'high', tags: ['emergency_stop'],
+      details: { control: 'kill', scope: 'workspace', previousState: 'running', executionState: 'stopped' },
     });
     for (const a of ['pause', 'resume', 'kill']) {
       expect(results[a].map((e) => e.action)).not.toContain('control.killed');
     }
-    expect(change('kill', 'control.emergency_stopped').target).toEqual({ type: 'execution_state', id: user.threadId });
+    expect(change('kill', 'control.emergency_stopped').target).toEqual({ type: 'execution_state', id: user.userId });
+    // The stop is persisted for the workspace: lift it for the tests that follow.
+    await pool.query('DELETE FROM execution_state WHERE user_id = $1', [user.userId]);
   });
 
   it('audits a user message (thread.created + thread.message_received) without its text, and the brain reply/explanation by length', async () => {
@@ -448,7 +451,7 @@ describe('rejected commands, denials and control', () => {
   });
 
   it('with AUDIT_CONTENT_ENABLED, the message, reply, explanation and clarification texts travel as content (secrets masked, lengths kept in details)', async () => {
-    setAuditForTests(createHubAudit({ outbox: new PostgresOutboxStore({ pool }), contentEnabled: true }));
+    setAuditForTests(createHubAudit({ outbox: new PostgresOutboxStore({ pool }), contentEnabled: true, contentMaskPii: true }));
     const text = 'Plan the brief for jane@example.com, password: hunter2, card 4111 1111 1111 1111';
     const brain: BrainPort = {
       process: async (envelope) =>
@@ -474,10 +477,16 @@ describe('rejected commands, denials and control', () => {
       const sent = await post('send_message', { text });
       expectOneConsistentTrace(sent.events, sent.clientMsgId);
       const message = sent.events.find((e) => e.action === 'thread.message_received')!;
-      const maskedText = 'Plan the brief for jane@example.com, password: [REDACTED], card [REDACTED_CARD]';
-      expect(message.content).toEqual({ kind: 'user_message', text: maskedText, truncated: false, originalLength: maskedText.length, redactions: 2 });
+      const maskedText = 'Plan the brief for [REDACTED:email], password: [REDACTED], card [REDACTED_CARD]';
+      expect(message.content).toEqual({
+        kind: 'user_message',
+        text: maskedText,
+        truncated: false,
+        originalLength: maskedText.length,
+        redactions: 3,
+      });
       expect(message.details).toMatchObject({ textLength: text.length });
-      expect(JSON.stringify(message)).not.toMatch(/hunter2|4111/);
+      expect(JSON.stringify(message)).not.toMatch(/hunter2|4111|jane@example\.com/);
       const reply = sent.events.find((e) => e.action === 'brain.reply_generated')!;
       expect(reply.content).toMatchObject({ kind: 'brain_reply', text: 'Got it, Bearer [REDACTED] is not stored.', redactions: 1, truncated: false });
       expect(reply.details).toMatchObject({ textLength: 'Got it, Bearer abc.def.ghi is not stored.'.length });
@@ -573,9 +582,12 @@ describe('rejected commands, denials and control', () => {
       expect(rejected).toMatchObject({ category: 'approval', riskLevel: 'low' });
       expect(declined.find((e) => e.action === 'goal.budget_declined')).toMatchObject({
         category: 'approval', riskLevel: 'low', goalId: created.goalId, parentSpanId: rejected.spanId,
-        target: { type: 'ask', id: ask.payload.askId }, details: { enforced: false, currentCost: 100, proposedCost: 120 },
+        target: { type: 'ask', id: ask.payload.askId }, details: { enforced: true, currentCost: 100, proposedCost: 120 },
       });
       expect(declined.map((e) => e.action)).not.toContain('goal.budget_approved');
+      expect(declined.find((e) => e.action === 'budget.evaluated')).toMatchObject({
+        outcome: 'denied', details: { decision: 'declined', enforced: true, decidedBy: 'user' },
+      });
     } finally {
       await local.close();
     }
