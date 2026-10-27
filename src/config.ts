@@ -46,6 +46,7 @@ export const config = {
   },
   
   redis: {
+    /** redis:// or rediss:// (TLS). Checked where the client is created (services/redis.ts): production refuses a URL without a password. */
     url: process.env.REDIS_URL || 'redis://localhost:6379',
   },
   
