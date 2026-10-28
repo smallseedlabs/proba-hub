@@ -156,6 +156,33 @@ export const config = {
     },
   },
   
+  /**
+   * Context bridge: act-as assertion minting, context-reader internal reads, and
+   * the ContextClient HTTP adapter. The brain is not wired to the client yet.
+   */
+  contextBridge: {
+    /** Base URL of the context bridge (e.g. http://127.0.0.1:3500). Empty = client disabled. */
+    url: (process.env.CONTEXT_BRIDGE_URL || '').trim().replace(/\/+$/, ''),
+    /** Accept the context-reader role on /v1/internal/* (requires key files). */
+    contextReaderEnabled: envBool('HUB_CONTEXT_READER_ENABLED', false),
+    /** PKCS#8 PEM used to mint act-as assertions. Required in production when CONTEXT_BRIDGE_URL is set. */
+    assertionPrivateKeyFile: (process.env.HUB_ASSERTION_PRIVATE_KEY_FILE || '').trim(),
+    /** Key id stamped in the JWT header when minting. */
+    assertionKeyId: (process.env.HUB_ASSERTION_KEY_ID || '').trim(),
+    /** Optional JWKS for verification/rotation; when empty, derived from the private key. */
+    assertionPublicKeyFile: (process.env.HUB_ASSERTION_PUBLIC_KEY_FILE || '').trim(),
+    /** JWKS of the bridge's service-token public keys. */
+    contextServicePublicKeyFile: (process.env.CONTEXT_SERVICE_PUBLIC_KEY_FILE || '').trim(),
+    /** Timeout for ContextClient HTTP calls. */
+    timeoutMs: envInt('CONTEXT_BRIDGE_TIMEOUT_MS', 10_000),
+    /** Circuit breaker: failures before open. */
+    failureThreshold: envInt('CONTEXT_BRIDGE_FAILURE_THRESHOLD', 5),
+    /** Circuit breaker: open duration in ms. */
+    openMs: envInt('CONTEXT_BRIDGE_CIRCUIT_OPEN_MS', 30_000),
+    /** Cap on GET /v1/internal/threads/{id}/messages?limit=. */
+    messagesLimitCap: envInt('HUB_INTERNAL_MESSAGES_LIMIT_CAP', 100),
+  },
+
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */
   audit: {
     /** Master switch: when false no audit event is written to audit_outbox. */

@@ -93,6 +93,7 @@ Key variables:
 - `BRAIN_PROVIDER`: Which brain answers (`mock` default, or `deepseek`; see [Brain providers](#brain-providers)). `MOCK_BRAIN_SCENARIO`: Which YAML scenario the `mock` brain runs (`happy_path`, `approval_edit`, etc.)
 - `DEEPSEEK_API_KEY` / `DEEPSEEK_API_KEY_FILE` (required with `BRAIN_PROVIDER=deepseek`; the file wins), `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_TIMEOUT_MS`; limits `BRAIN_MAX_OUTPUT_TOKENS`, `BRAIN_MAX_TOOL_CALLS`, `BRAIN_MAX_ACTION_SPEND`, `BRAIN_MAX_PLAN_BUDGET`, `BRAIN_ALLOWED_TOOLS`, `BRAIN_MAX_CONTEXT_MESSAGES`
 - `AUDIT_ENABLED` (default `true`), `AUDIT_RELAY_ENABLED` (default `true`, `false` under `NODE_ENV=test`), `AUDIT_PUBLISHER` (`redis` default, or `log`; see [Audit trail](#audit-trail)), `AUDIT_STREAM` (default `proba.audit.events`), `AUDIT_WORKSPACE_ID` (default `seedbed`), `AUDIT_CONTENT_ENABLED` (default `false`: raw message/reply text on audit events; memory learns conversation text only when this is on), `AUDIT_CONTENT_MASK_PII` (default `true`: also mask emails, phones and IBANs in that text; secrets and cards are always masked): see [Audit trail](#audit-trail)
+- Context bridge: `CONTEXT_BRIDGE_URL`, `HUB_ASSERTION_PRIVATE_KEY_FILE` / `HUB_ASSERTION_KEY_ID` / `HUB_ASSERTION_PUBLIC_KEY_FILE`, `CONTEXT_SERVICE_PUBLIC_KEY_FILE`, `HUB_CONTEXT_READER_ENABLED` — see [Act-as assertions and internal reads](docs/ASSERTIONS_AND_INTERNAL_READS.md)
 
 ### Running with Docker Compose
 

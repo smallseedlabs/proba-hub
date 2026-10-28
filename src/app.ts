@@ -7,12 +7,17 @@ import { logger } from './logger.js';
 import { commandRoutes } from './routes/commands.js';
 import { eventRoutes } from './routes/events.js';
 import { readRoutes } from './routes/reads.js';
+import { internalRoutes } from './routes/internal.js';
+import { wellKnownRoutes } from './routes/well-known.js';
 import { startOutboxRelay, stopOutboxRelay } from './services/outbox-relay.js';
 import { startAuditRelay, stopAuditRelay } from './audit/relay.js';
 import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
 import { createBrain } from './brain/factory.js';
 import type { BrainPort } from './types.js';
+import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
+import type { ContextClient } from './brain/context-client.js';
+import { createContextClient } from './brain/http-context-client.js';
 
 export interface AppOptions {
   /** Start outbox relay + ask expiry jobs (default true). */
@@ -36,6 +41,10 @@ export interface AppOptions {
   allowedEmailDomains?: readonly string[];
   /** Register POST /dev/login. Defaults to config.auth.devLoginEnabled (never in production). */
   devLogin?: boolean;
+  /** Inject assertion / context-reader auth (tests). When omitted, loaded from config. */
+  assertionAuth?: ContextBridgeHubAuth;
+  /** Inject ContextClient (tests). Not wired into the brain yet. */
+  contextClient?: ContextClient;
 }
 
 /**
@@ -78,6 +87,39 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     heartbeatIntervalMs: options.sseHeartbeatIntervalMs ?? config.sse.heartbeatIntervalMs,
   });
   await fastify.register(readRoutes, { prefix: '/v1' });
+
+  const assertionAuth =
+    options.assertionAuth ??
+    (await createAssertionRuntime({
+      env: config.env,
+      contextReaderEnabled: config.contextBridge.contextReaderEnabled,
+      contextBridgeUrl: config.contextBridge.url,
+      assertionPrivateKeyFile: config.contextBridge.assertionPrivateKeyFile,
+      assertionKeyId: config.contextBridge.assertionKeyId,
+      assertionPublicKeyFile: config.contextBridge.assertionPublicKeyFile,
+      contextServicePublicKeyFile: config.contextBridge.contextServicePublicKeyFile,
+    }));
+
+  await fastify.register(wellKnownRoutes, {
+    prefix: '/v1',
+    assertionJwks: assertionAuth.assertionJwks,
+  });
+
+  if (assertionAuth.contextReaderEnabled) {
+    await fastify.register(internalRoutes, { prefix: '/v1/internal', auth: assertionAuth });
+  }
+
+  // ContextClient is constructed for later brain wiring (brief 07); not used here.
+  const contextClient =
+    options.contextClient ??
+    createContextClient({
+      baseUrl: config.contextBridge.url,
+      timeoutMs: config.contextBridge.timeoutMs,
+      failureThreshold: config.contextBridge.failureThreshold,
+      openMs: config.contextBridge.openMs,
+    });
+  fastify.decorate('contextClient', contextClient);
+  fastify.decorate('assertionAuth', assertionAuth);
 
   if (options.startBackgroundJobs !== false) {
     await startOutboxRelay();
