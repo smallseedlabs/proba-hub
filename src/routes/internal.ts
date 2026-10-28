@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import type { ActAsAssertionClaims } from '@smallseedlabs/proba-protocol';
 import {
@@ -54,6 +55,20 @@ function routeKey(request: FastifyRequest): string {
 export async function internalRoutes(fastify: FastifyInstance, options: InternalRoutesOptions) {
   const { auth } = options;
   const messagesCap = options.messagesLimitCap ?? config.contextBridge.messagesLimitCap;
+
+  // Framework rate limit so CodeQL sees a recognised control on these authorised routes.
+  // Ceiling is intentionally high: auth denials and per-caller limits elsewhere remain the primary control.
+  await fastify.register(rateLimit, {
+    global: true,
+    max: 1_000,
+    timeWindow: 60_000,
+    errorResponseBuilder: (_request, context) => ({
+      statusCode: 429,
+      error: 'rate_limited',
+      message: 'Too many requests. Try again shortly.',
+      retryAfter: context.after,
+    }),
+  });
 
   const deny = async (
     request: FastifyRequest,
