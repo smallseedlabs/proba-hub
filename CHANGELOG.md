@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Context bridge support (brief 05): EdDSA act-as assertion minting (`HUB_ASSERTION_PRIVATE_KEY_FILE`),
+  public JWKS at `GET /v1/.well-known/assertion-keys`, `context-reader` internal reads
+  (`GET /v1/internal/goals/{goalId}/state`, `GET /v1/internal/threads/{threadId}/messages`,
+  `POST /v1/internal/authorize`), `ContextClient` HTTP adapter (`CONTEXT_BRIDGE_URL`, not wired to the brain yet),
+  keygen script, and contract fixtures under `docs/contracts/context-reader/`. See
+  [`docs/ASSERTIONS_AND_INTERNAL_READS.md`](docs/ASSERTIONS_AND_INTERNAL_READS.md).
+- Dependency `@smallseedlabs/proba-protocol` bumped to `v0.4.0`.
+
 ### Security
 
 - `docker-compose.yml`: every published port is bound to `127.0.0.1`; no password has a default (`POSTGRES_PASSWORD`,

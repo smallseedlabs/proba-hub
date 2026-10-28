@@ -1,0 +1,23 @@
+{
+  "description": "Authorize whether the user may act on the goal in the workspace.",
+  "request": {
+    "method": "POST",
+    "path": "/v1/internal/authorize",
+    "headers": {
+      "Authorization": "Bearer <service token>",
+      "X-Act-As": "<act-as assertion>"
+    },
+    "body": {
+      "userId": "660e8400-e29b-41d4-a716-446655440001",
+      "workspaceId": "seedbed",
+      "goalId": "770e8400-e29b-41d4-a716-446655440002"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "allowed": true,
+      "reason": "ok"
+    }
+  }
+}

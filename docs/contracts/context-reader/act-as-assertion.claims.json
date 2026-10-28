@@ -1,0 +1,15 @@
+{
+  "description": "Claims of the Hub's act-as assertion sent as X-Act-As (EdDSA; header carries the kid of a key in HUB_ASSERTION_PUBLIC_KEY_FILE). sub, workspaceId and goalId must equal actorId/workspaceId/goalId of the request. exp is at most 300 seconds after iat.",
+  "claims": {
+    "iss": "proba-hub",
+    "aud": ["proba-context", "proba-audit", "proba-memory", "proba-hub"],
+    "sub": "660e8400-e29b-41d4-a716-446655440001",
+    "workspaceId": "seedbed",
+    "goalId": "770e8400-e29b-41d4-a716-446655440002",
+    "threadId": "880e8400-e29b-41d4-a716-446655440003",
+    "scopes": ["context:build"],
+    "iat": 1761386400,
+    "exp": 1761386700,
+    "jti": "a1b2c3d4-5e6f-4a52-9d59-2d1f6a0b8c22"
+  }
+}
