@@ -344,5 +344,37 @@ describe('public API regression (internal routes absent without context-reader)'
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).goals).toBeDefined();
   });
+
+  it('does not register /v1/internal when the context-reader role is off', async () => {
+    const offAuth = await createAssertionRuntime({
+      env: 'test',
+      contextReaderEnabled: false,
+      contextBridgeUrl: '',
+      assertionPrivateKeyFile: hubPem,
+      assertionKeyId: signers.hub.kid,
+      assertionPublicKeyFile: hubJwks,
+      contextServicePublicKeyFile: '',
+    });
+    const offApp = await buildApp({ startBackgroundJobs: false, assertionAuth: offAuth });
+    try {
+      const userId = randomUUID();
+      const goal = randomUUID();
+      const token = await signers.mintServiceToken();
+      const assertion = await signers.mintAssertion({
+        sub: userId,
+        workspaceId: 'seedbed',
+        goalId: goal,
+        threadId: randomUUID(),
+      });
+      const res = await offApp.inject({
+        method: 'GET',
+        url: `/v1/internal/goals/${goal}/state?actorId=${userId}&workspaceId=seedbed&goalId=${goal}`,
+        headers: { authorization: `Bearer ${token}`, 'x-act-as': assertion },
+      });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await offApp.close();
+    }
+  });
 });
 
