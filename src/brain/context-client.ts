@@ -1,8 +1,8 @@
 import type { ContextPacket, ContextRequest } from '@smallseedlabs/proba-protocol';
 
 /**
- * Port the Hub uses to ask the context bridge for a packet before a brain step.
- * Not wired into the brain in this change (brief 07).
+ * Port the Hub uses to ask the context bridge for a packet before a brain step
+ * (`POST /v1/context/build`). Wired in `context-attach.ts` / CommandProcessor.
  */
 export interface ContextClient {
   build(request: ContextRequest, options?: ContextClientBuildOptions): Promise<ContextPacket>;
