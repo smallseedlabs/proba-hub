@@ -18,21 +18,9 @@ import type { BrainPort } from './types.js';
 import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
 import type { ContextClient } from './brain/context-client.js';
 import { createContextClient } from './brain/http-context-client.js';
+import { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
 
-/** Production requires the bridge on and CONTEXT_BRIDGE_URL set. */
-export function assertContextBridgeProductionGuards(
-  cfg: Pick<typeof config, 'isProduction' | 'contextBridge'> = config
-): void {
-  if (!cfg.isProduction) return;
-  if (!cfg.contextBridge.enabled) {
-    throw new Error(
-      'CONTEXT_BRIDGE_ENABLED cannot be false when NODE_ENV=production (local-only opt-out)'
-    );
-  }
-  if (!cfg.contextBridge.url.trim()) {
-    throw new Error('CONTEXT_BRIDGE_URL is required when NODE_ENV=production');
-  }
-}
+export { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
 
 export interface AppOptions {
   /** Start outbox relay + ask expiry jobs (default true). */

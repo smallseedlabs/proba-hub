@@ -50,7 +50,7 @@ describe('context bridge config', () => {
 describe('assertContextBridgeProductionGuards', () => {
   it('refuses production with the feature flag off', async () => {
     vi.resetModules();
-    const { assertContextBridgeProductionGuards } = await import('./app.js');
+    const { assertContextBridgeProductionGuards } = await import('./brain/context-bridge-guards.js');
     expect(() =>
       assertContextBridgeProductionGuards({
         isProduction: true,
@@ -64,7 +64,7 @@ describe('assertContextBridgeProductionGuards', () => {
 
   it('refuses production without CONTEXT_BRIDGE_URL', async () => {
     vi.resetModules();
-    const { assertContextBridgeProductionGuards } = await import('./app.js');
+    const { assertContextBridgeProductionGuards } = await import('./brain/context-bridge-guards.js');
     expect(() =>
       assertContextBridgeProductionGuards({
         isProduction: true,
@@ -75,7 +75,7 @@ describe('assertContextBridgeProductionGuards', () => {
 
   it('allows non-production with the flag off', async () => {
     vi.resetModules();
-    const { assertContextBridgeProductionGuards } = await import('./app.js');
+    const { assertContextBridgeProductionGuards } = await import('./brain/context-bridge-guards.js');
     expect(() =>
       assertContextBridgeProductionGuards({
         isProduction: false,
