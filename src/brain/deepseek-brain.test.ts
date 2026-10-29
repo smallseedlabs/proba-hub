@@ -47,6 +47,7 @@ const context = (messages: BrainContext['messages'] = []): BrainContext => ({
   userId: 'u1', threadId: 't1', messages, goals: [], client: {} as PoolClient,
 });
 
+
 const message = (text: string, source: string, minute: number) => ({
   id: `m${minute}`, threadId: 't1', text, source, createdAt: new Date(2026, 0, 1, 0, minute),
 });

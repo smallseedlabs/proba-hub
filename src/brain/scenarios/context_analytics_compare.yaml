@@ -1,0 +1,35 @@
+name: context_analytics_compare
+description: Hybrid needs — ask the bridge for an analytics comparison, then decide
+
+steps:
+  - trigger:
+      type: create_goal
+    needs:
+      - kind: analytics_compare
+        campaignIds:
+          - 110e8400-e29b-41d4-a716-4466554400aa
+          - 110e8400-e29b-41d4-a716-4466554400bb
+        metric: spend
+        window: 7d
+    outputs: []
+
+  - trigger:
+      type: create_goal
+    goal:
+      status: active
+      progress:
+        completed: 1
+        total: 2
+        milestones:
+          - name: Analytics compared
+            completed: true
+          - name: Budget decided
+            completed: false
+    outputs:
+      - type: decision
+        decision: change
+        target: daily_budget
+        evidence:
+          - Compared spend across the two campaigns for 7d
+        confidence: 0.8
+        recommendation: Raise the daily budget for the stronger campaign

@@ -2,8 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { MockBrain } from './mock-brain.js';
 import type { CommandEnvelope } from '@smallseedlabs/proba-protocol';
 import type { PoolClient } from 'pg';
+import { normalizeBrainStepResult } from '../types.js';
 
 const mockClient = {} as PoolClient;
+
+async function brainOutputs(brain: MockBrain, command: CommandEnvelope, context: Parameters<MockBrain['process']>[1]) {
+  return normalizeBrainStepResult(await brain.process(command, context)).outputs;
+}
 
 describe('MockBrain Direct Unit Tests', () => {
   describe('happy_path scenario', () => {
@@ -26,7 +31,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step1Outputs = await brain.process(step1Command, {
+      const step1Outputs = await brainOutputs(brain, step1Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -53,7 +58,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step2Outputs = await brain.process(step2Command, {
+      const step2Outputs = await brainOutputs(brain, step2Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -78,7 +83,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step3Outputs = await brain.process(step3Command, {
+      const step3Outputs = await brainOutputs(brain, step3Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -104,7 +109,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step4Outputs = await brain.process(step4Command, {
+      const step4Outputs = await brainOutputs(brain, step4Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -139,7 +144,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step1Outputs = await brain.process(step1Command, {
+      const step1Outputs = await brainOutputs(brain, step1Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -166,7 +171,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step2Outputs = await brain.process(step2Command, {
+      const step2Outputs = await brainOutputs(brain, step2Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -193,7 +198,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step3Outputs = await brain.process(step3Command, {
+      const step3Outputs = await brainOutputs(brain, step3Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -228,7 +233,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step1Outputs = await brain.process(step1Command, {
+      const step1Outputs = await brainOutputs(brain, step1Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -253,7 +258,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step2Outputs = await brain.process(step2Command, {
+      const step2Outputs = await brainOutputs(brain, step2Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -279,7 +284,7 @@ describe('MockBrain Direct Unit Tests', () => {
         sentAt: new Date().toISOString(),
       };
 
-      const step3Outputs = await brain.process(step3Command, {
+      const step3Outputs = await brainOutputs(brain, step3Command, {
         userId: 'user1',
         threadId,
         goals: [],
@@ -320,19 +325,19 @@ describe('MockBrain scenario selection and goal updates', () => {
 
   it('uses the default scenario unless the goal names one with #tag', async () => {
     const brain = new MockBrain('happy_path');
-    const def = await brain.process(createGoal('t1', 'Launch shoes'), ctx('t1'));
+    const def = await brainOutputs(brain, createGoal('t1', 'Launch shoes'), ctx('t1'));
     expect(def[0]).toMatchObject({ type: 'clarify', reason: 'Need clarification on target audience' });
 
-    const tagged = await brain.process(createGoal('t2', 'Launch shoes #approval_edit'), ctx('t2'));
+    const tagged = await brainOutputs(brain, createGoal('t2', 'Launch shoes #approval_edit'), ctx('t2'));
     expect(tagged[0].type).toBe('plan');
 
-    const unknownTag = await brain.process(createGoal('t3', 'Launch #nope'), ctx('t3'));
+    const unknownTag = await brainOutputs(brain, createGoal('t3', 'Launch #nope'), ctx('t3'));
     expect(unknownTag[0].type).toBe('clarify');
   });
 
   it('reports the matched step goal update once', async () => {
     const brain = new MockBrain('happy_path');
-    await brain.process(createGoal('t4', 'Goal'), ctx('t4'));
+    await brainOutputs(brain, createGoal('t4', 'Goal'), ctx('t4'));
     const update = brain.takeGoalUpdate('t4');
     expect(update?.progress).toMatchObject({ completed: 0, total: 4 });
     expect(brain.takeGoalUpdate('t4')).toBeUndefined();
