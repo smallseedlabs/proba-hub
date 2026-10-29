@@ -22,10 +22,12 @@ declare module 'fastify' {
       request: FastifyRequest,
       reply: FastifyReply
     ) => Promise<void>;
-    /** Context bridge HTTP client (not wired into the brain yet). */
+    /** Context bridge HTTP client (POST /v1/context/build). */
     contextClient: import('./brain/context-client.js').ContextClient;
     /** Act-as minting and context-reader verification. */
     assertionAuth: import('./auth/assertions/index.js').ContextBridgeHubAuth;
+    /** Command processor (brain + bridge wiring). */
+    commandProcessor: import('./services/command-processor.js').CommandProcessor;
   }
   interface FastifyRequest {
     /** SHA-256 of the bearer token that authenticated this request. */

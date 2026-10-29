@@ -1,20 +1,30 @@
+import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
 import { kickOutboxRelay } from './outbox-relay.js';
 import { isBrainOutput } from '@smallseedlabs/proba-protocol';
 import type { BrainPort, BrainGoalUpdate, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
+import { normalizeBrainStepResult } from '../types.js';
 import type { 
   CommandEnvelope, 
   BrainOutput,
   ControlPayload,
   CreateGoalPayload,
   AnswerAskPayload,
+  ContextPacket,
 } from '@smallseedlabs/proba-protocol';
 import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
 import { toJsonb } from '../db/jsonb.js';
 import { getAudit } from '../audit/service.js';
 import { runInSpan, startSpan, type Span } from '../audit/trace.js';
+import type { AssertionMinter } from '../auth/assertions/mint.js';
+import type { ContextClient } from '../brain/context-client.js';
+import {
+  contextBridgeRuntimeFromConfig,
+  runBrainWithBridge,
+  type ContextBridgeRuntime,
+} from '../brain/context-attach.js';
 import {
   lockExecutionState,
   nextExecutionState,
@@ -89,8 +99,43 @@ function clarificationText(output: { reason?: string; questions: Array<{ text: s
   return [output.reason, ...lines].filter((l): l is string => typeof l === 'string' && l.length > 0).join('\n');
 }
 
+export interface CommandProcessorOptions {
+  /** Context bridge HTTP client. When omitted, the brain uses the legacy in-Hub context. */
+  contextClient?: ContextClient;
+  /** Mints act-as assertions for bridge calls. */
+  assertionMinter?: AssertionMinter | null;
+  /** Override config.contextBridge.enabled (tests). */
+  contextBridgeEnabled?: boolean;
+  /** Override max hybrid needs rounds (tests). */
+  maxNeedRounds?: number;
+  /** Override failure mode (tests). */
+  onFailure?: ContextBridgeRuntime['onFailure'];
+}
+
 export class CommandProcessor {
-  constructor(private brain: BrainPort) {}
+  private readonly bridge: ContextBridgeRuntime | null;
+  /** Last packet attached to a brain step in this process (for tests / step linkage). */
+  lastAttachedPacket: ContextPacket | null = null;
+  lastAttachedStep: { stepId: string; stepType: string; packetId: string; packetHash: string } | null =
+    null;
+
+  constructor(
+    private brain: BrainPort,
+    options: CommandProcessorOptions = {}
+  ) {
+    if (options.contextClient === undefined) {
+      this.bridge = null;
+    } else {
+      const runtime = contextBridgeRuntimeFromConfig(
+        options.contextClient,
+        options.assertionMinter ?? null
+      );
+      if (options.contextBridgeEnabled !== undefined) runtime.enabled = options.contextBridgeEnabled;
+      if (options.maxNeedRounds !== undefined) runtime.maxNeedRounds = Math.max(0, options.maxNeedRounds);
+      if (options.onFailure !== undefined) runtime.onFailure = options.onFailure;
+      this.bridge = runtime;
+    }
+  }
 
   async processCommand(
     userId: string,
@@ -215,6 +260,10 @@ export class CommandProcessor {
     // Set when the user declined an ask that carried a cost: the budget is not approved, so nothing launches.
     let budgetDeclined = false;
     
+    // Pre-allocate goal id for create_goal so the bridge assertion can carry it
+    // before the goals row is inserted (after the brain step).
+    const pendingGoalId = envelope.type === 'create_goal' ? randomUUID() : undefined;
+
     // Commands with special handlers (answer_ask, approve_plan) skip initial brain invocation
     // and invoke it themselves after doing their specific work
     if (envelope.type === 'answer_ask' || envelope.type === 'approve_plan') {
@@ -225,7 +274,9 @@ export class CommandProcessor {
       let brainOutputs: BrainOutput[];
       let brainSpan: Span;
       try {
-        ({ outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, envelope, context));
+        ({ outputs: brainOutputs, span: brainSpan } = await this.callBrain(client, scope, envelope, context, {
+          goalId: pendingGoalId,
+        }));
       } catch (error) {
         // Only a failing brain is turned into an error event. Anything else (for
         // example the audit insert) must roll the command back.
@@ -320,8 +371,8 @@ export class CommandProcessor {
 
     if (envelope.type === 'answer_ask') {
       const answerPayload = envelope.payload as AnswerAskPayload;
-      const askType = (envelope.payload as unknown as Record<string, unknown>).askType;
-      logger.info({ askId: answerPayload.askId, askType }, 'Handling answer_ask command');
+      const payloadAskType = (envelope.payload as unknown as Record<string, unknown>).askType;
+      logger.info({ askId: answerPayload.askId, askType: payloadAskType }, 'Handling answer_ask command');
       // Clients answer with { askId, choice, values }; the brain also needs the
       // ask type (clarify / plan_approval / action_approval). Look it up.
       const brainEnvelope = await this.withAskType(client, envelope);
@@ -342,7 +393,12 @@ export class CommandProcessor {
       
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const called = await this.callBrain(client, scope, brainEnvelope, context);
+      const resolvedAskType = String(
+        (brainEnvelope.payload as unknown as Record<string, unknown>).askType ?? ''
+      );
+      const called = await this.callBrain(client, scope, brainEnvelope, context, {
+        askType: resolvedAskType,
+      });
       const brainSpan = called.span;
       const brainOutputs = budgetDeclined
         ? await this.enforceBudgetDecline(client, scope, called.outputs, String(answerPayload.askId), brainSpan)
@@ -424,7 +480,13 @@ export class CommandProcessor {
     const goalUpdate: BrainGoalUpdate | undefined = budgetDeclined ? { status: 'paused' } : reportedUpdate;
 
     if (envelope.type === 'create_goal') {
-      const goal = await this.createGoal(client, userId, envelope.threadId!, envelope.payload as CreateGoalPayload);
+      const goal = await this.createGoal(
+        client,
+        userId,
+        envelope.threadId!,
+        envelope.payload as CreateGoalPayload,
+        pendingGoalId
+      );
       events.push(await this.emitGoalUpdated(client, userId, envelope.threadId!, goal, goalUpdate ?? {}, 'created'));
     } else if (goalUpdate && envelope.threadId) {
       const goal = await this.latestGoal(client, envelope.threadId);
@@ -446,21 +508,64 @@ export class CommandProcessor {
   // committed. Parents: the request's root span -> brain call -> output/tool.
   // ---------------------------------------------------------------------------
 
-  /** Call the brain inside its own span and audit the call (brain.llm_call). */
+  /**
+   * Call the brain inside its own span and audit the call (brain.llm_call).
+   * When the context bridge flag is on: mint assertion → POST /v1/context/build →
+   * attach packet → optional hybrid needs rounds → brain. Never falls back to an
+   * in-process builder on failure.
+   */
   private async callBrain(
     client: PoolClient,
     scope: AuditScope,
     envelope: CommandEnvelope,
-    context: BrainContext
-  ): Promise<{ outputs: BrainOutput[]; span: Span }> {
+    context: BrainContext,
+    options: { askType?: string; goalId?: string } = {}
+  ): Promise<{ outputs: BrainOutput[]; span: Span; held?: boolean }> {
     const span = startSpan();
     const started = Date.now();
     let outputs: BrainOutput[];
+    let held = false;
+
     try {
-      outputs = await runInSpan(span, () => this.brain.process(envelope, context));
+      if (this.bridge?.enabled) {
+        const result = await runInSpan(span, () =>
+          runBrainWithBridge({
+            runtime: this.bridge!,
+            brain: this.brain,
+            client,
+            scope,
+            envelope,
+            context,
+            brainSpan: span,
+            askType: options.askType,
+            goalId: options.goalId,
+          })
+        );
+        outputs = result.outputs;
+        held = result.held;
+        if (result.attached) {
+          this.lastAttachedPacket = result.attached.packet;
+          this.lastAttachedStep = {
+            stepId: result.attached.stepId,
+            stepType: result.attached.stepType,
+            packetId: result.attached.packet.packetId,
+            packetHash: result.attached.packet.packetHash,
+          };
+        } else {
+          this.lastAttachedPacket = null;
+          this.lastAttachedStep = null;
+        }
+      } else {
+        // Feature flag off (local only): legacy in-Hub context, unchanged behaviour.
+        this.lastAttachedPacket = null;
+        this.lastAttachedStep = null;
+        const result = await runInSpan(span, () => this.brain.process(envelope, context));
+        outputs = normalizeBrainStepResult(result).outputs;
+      }
     } catch (error) {
       throw new BrainCallError(error, span, Date.now() - started, envelope.type);
     }
+
     await getAudit().emit(
       {
         action: 'brain.llm_call',
@@ -474,13 +579,21 @@ export class CommandProcessor {
           trigger: envelope.type,
           brain: this.brain.constructor?.name ?? 'brain',
           outputCount: outputs.length,
+          held,
+          ...(this.lastAttachedStep
+            ? {
+                packetId: this.lastAttachedStep.packetId,
+                stepId: this.lastAttachedStep.stepId,
+                stepType: this.lastAttachedStep.stepType,
+              }
+            : { bridge: this.bridge?.enabled ? 'failed' : 'off' }),
           // Types and sizes only: never the text the brain produced.
           outputs: outputs.slice(0, 20).map(summarizeOutput),
         },
       },
       { tx: client }
     );
-    return { outputs, span };
+    return { outputs, span, held };
   }
 
   private async auditBrainFailure(
@@ -1130,20 +1243,35 @@ export class CommandProcessor {
     client: PoolClient,
     userId: string,
     threadId: string,
-    payload: CreateGoalPayload
+    payload: CreateGoalPayload,
+    goalId?: string
   ): Promise<GoalRow> {
     const result = await client.query<GoalRow>(
-      `INSERT INTO goals (user_id, thread_id, title, description, constraints, budget, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'active')
-       RETURNING id, title, status, progress, metrics, budget`,
-      [
-        userId,
-        threadId,
-        payload.title,
-        payload.description,
-        toJsonb(payload.constraints),
-        toJsonb(payload.budget),
-      ]
+      goalId
+        ? `INSERT INTO goals (id, user_id, thread_id, title, description, constraints, budget, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+           RETURNING id, title, status, progress, metrics, budget`
+        : `INSERT INTO goals (user_id, thread_id, title, description, constraints, budget, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active')
+           RETURNING id, title, status, progress, metrics, budget`,
+      goalId
+        ? [
+            goalId,
+            userId,
+            threadId,
+            payload.title,
+            payload.description,
+            toJsonb(payload.constraints),
+            toJsonb(payload.budget),
+          ]
+        : [
+            userId,
+            threadId,
+            payload.title,
+            payload.description,
+            toJsonb(payload.constraints),
+            toJsonb(payload.budget),
+          ]
     );
     return result.rows[0];
   }
