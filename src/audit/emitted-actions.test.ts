@@ -69,7 +69,7 @@ describe('actions the Hub emits', () => {
       'control.paused', 'control.resumed', 'control.emergency_stopped',
       'thread.created', 'thread.message_received', 'thread.access_denied',
       'tool.proposed', 'brain.llm_call', 'brain.reply_generated', 'brain.explanation_generated',
-      'brain.clarification_requested',
+      'brain.clarification_requested', 'brain.context_attached', 'context.build_failed',
     ]) {
       expect(emitted.has(action), action).toBe(true);
     }

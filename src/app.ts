@@ -18,6 +18,9 @@ import type { BrainPort } from './types.js';
 import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
 import type { ContextClient } from './brain/context-client.js';
 import { createContextClient } from './brain/http-context-client.js';
+import { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
+
+export { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
 
 export interface AppOptions {
   /** Start outbox relay + ask expiry jobs (default true). */
@@ -43,8 +46,10 @@ export interface AppOptions {
   devLogin?: boolean;
   /** Inject assertion / context-reader auth (tests). When omitted, loaded from config. */
   assertionAuth?: ContextBridgeHubAuth;
-  /** Inject ContextClient (tests). Not wired into the brain yet. */
+  /** Inject ContextClient (tests). */
   contextClient?: ContextClient;
+  /** Override context bridge feature flag (tests). */
+  contextBridgeEnabled?: boolean;
 }
 
 /**
@@ -55,13 +60,43 @@ export interface AppOptions {
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const fastify = await createServer();
 
+  assertContextBridgeProductionGuards();
+
   const brain =
     options.brain ??
     createBrain({
       provider: options.brainProvider ?? (options.brainScenario ? 'mock' : undefined),
       scenario: options.brainScenario,
     });
-  const processor = new CommandProcessor(brain);
+
+  const assertionAuth =
+    options.assertionAuth ??
+    (await createAssertionRuntime({
+      env: config.env,
+      contextReaderEnabled: config.contextBridge.contextReaderEnabled,
+      contextBridgeUrl: config.contextBridge.url,
+      assertionPrivateKeyFile: config.contextBridge.assertionPrivateKeyFile,
+      assertionKeyId: config.contextBridge.assertionKeyId,
+      assertionPublicKeyFile: config.contextBridge.assertionPublicKeyFile,
+      contextServicePublicKeyFile: config.contextBridge.contextServicePublicKeyFile,
+    }));
+
+  const contextClient =
+    options.contextClient ??
+    createContextClient({
+      baseUrl: config.contextBridge.url,
+      timeoutMs: config.contextBridge.timeoutMs,
+      failureThreshold: config.contextBridge.failureThreshold,
+      openMs: config.contextBridge.openMs,
+    });
+
+  const processor = new CommandProcessor(brain, {
+    contextClient,
+    assertionMinter: assertionAuth.minter,
+    ...(options.contextBridgeEnabled !== undefined
+      ? { contextBridgeEnabled: options.contextBridgeEnabled }
+      : {}),
+  });
 
   if (!config.isProduction && (options.devLogin ?? config.auth.devLoginEnabled)) {
     await fastify.register(devAuthRoutes);
@@ -88,18 +123,6 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
   await fastify.register(readRoutes, { prefix: '/v1' });
 
-  const assertionAuth =
-    options.assertionAuth ??
-    (await createAssertionRuntime({
-      env: config.env,
-      contextReaderEnabled: config.contextBridge.contextReaderEnabled,
-      contextBridgeUrl: config.contextBridge.url,
-      assertionPrivateKeyFile: config.contextBridge.assertionPrivateKeyFile,
-      assertionKeyId: config.contextBridge.assertionKeyId,
-      assertionPublicKeyFile: config.contextBridge.assertionPublicKeyFile,
-      contextServicePublicKeyFile: config.contextBridge.contextServicePublicKeyFile,
-    }));
-
   await fastify.register(wellKnownRoutes, {
     prefix: '/v1',
     assertionJwks: assertionAuth.assertionJwks,
@@ -109,17 +132,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     await fastify.register(internalRoutes, { prefix: '/v1/internal', auth: assertionAuth });
   }
 
-  // ContextClient is constructed for later brain wiring (brief 07); not used here.
-  const contextClient =
-    options.contextClient ??
-    createContextClient({
-      baseUrl: config.contextBridge.url,
-      timeoutMs: config.contextBridge.timeoutMs,
-      failureThreshold: config.contextBridge.failureThreshold,
-      openMs: config.contextBridge.openMs,
-    });
   fastify.decorate('contextClient', contextClient);
   fastify.decorate('assertionAuth', assertionAuth);
+  fastify.decorate('commandProcessor', processor);
 
   if (options.startBackgroundJobs !== false) {
     await startOutboxRelay();

@@ -1,0 +1,32 @@
+name: context_need_refused
+description: Hybrid needs — ask for a need policy refuses, then clarify from the gap
+
+steps:
+  - trigger:
+      type: create_goal
+    needs:
+      - kind: memory_search
+        query: cross_workspace_secrets
+        limit: 5
+    outputs: []
+
+  - trigger:
+      type: create_goal
+    requireGap: need_refused_by_policy
+    outputs:
+      - type: clarify
+        reason: That context request was refused by policy
+        questions:
+          - id: allowed_scope
+            text: What information within your workspace should I use instead?
+            type: text
+
+  - trigger:
+      type: create_goal
+    outputs:
+      - type: clarify
+        reason: Extra context was not available
+        questions:
+          - id: fallback
+            text: How would you like to proceed without that memory search?
+            type: text

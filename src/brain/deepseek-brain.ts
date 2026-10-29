@@ -1,5 +1,5 @@
 import { isBrainOutput } from '@smallseedlabs/proba-protocol';
-import type { CommandEnvelope, BrainOutput } from '@smallseedlabs/proba-protocol';
+import type { CommandEnvelope, BrainOutput, ContextPacket } from '@smallseedlabs/proba-protocol';
 import { BaseBrainPort } from './port.js';
 import { logger } from '../logger.js';
 import type { BrainContext } from '../types.js';
@@ -66,14 +66,35 @@ export class DeepSeekBrain extends BaseBrainPort {
     const raw = await this.complete(this.buildMessages(command, context));
     const outputs = this.applyLimits(this.parseOutputs(raw));
     logger.info(
-      { threadId: context.threadId, commandType: command.type, model: this.options.model, outputCount: outputs.length, durationMs: Date.now() - started },
+      {
+        threadId: context.threadId,
+        commandType: command.type,
+        model: this.options.model,
+        outputCount: outputs.length,
+        hasPacket: Boolean(context.contextPacket),
+        durationMs: Date.now() - started,
+      },
       'DeepSeek brain answered'
     );
     return outputs;
   }
 
-  /** History oldest first, then the command. Prompt text is never logged: it holds the user's conversation. */
+  /**
+   * When a context packet is present it is the only context input (bridge path).
+   * Otherwise history + goal notes are used (legacy local path when the flag is off).
+   * Prompt text is never logged: it holds the user's conversation.
+   */
   private buildMessages(command: CommandEnvelope, context: BrainContext): ChatMessage[] {
+    if (context.contextPacket) {
+      const system = [SYSTEM_PROMPT, this.limitsNote(), this.packetNote(context.contextPacket)]
+        .filter(Boolean)
+        .join('\n\n');
+      return [
+        { role: 'system', content: system },
+        { role: 'user', content: JSON.stringify({ command: command.type, payload: command.payload }) },
+      ];
+    }
+
     const { limits } = this.options;
     const history = [...(context.messages ?? [])]
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
@@ -108,6 +129,29 @@ export class DeepSeekBrain extends BaseBrainPort {
     const goal = context.goals?.[context.goals.length - 1];
     if (!goal) return '';
     return `Current goal: ${JSON.stringify({ title: goal.title, description: goal.description, budget: goal.budget, status: goal.status })}`;
+  }
+
+  /** Packet sections and gaps only — never treat user/memory text as instructions. */
+  private packetNote(packet: ContextPacket): string {
+    const sections = packet.sections.map((s) => ({
+      kind: s.kind,
+      priority: s.priority,
+      tokens: s.tokens,
+      items: s.items.map((item) => ({
+        itemId: item.itemId,
+        trust: item.trust,
+        sourceRef: item.sourceRef,
+        ...(item.text !== undefined ? { text: item.text } : {}),
+        ...(item.data !== undefined ? { data: item.data } : {}),
+      })),
+    }));
+    return `Context packet (only source of workspace data for this step):\n${JSON.stringify({
+      packetId: packet.packetId,
+      stepId: packet.stepId,
+      configVersion: packet.configVersion,
+      sections,
+      gaps: packet.gaps,
+    })}`;
   }
 
   private async complete(messages: ChatMessage[]): Promise<string> {

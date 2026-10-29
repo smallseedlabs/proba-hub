@@ -3,6 +3,9 @@ import type {
   CommandEnvelope,
   EventEnvelope,
   BrainOutput,
+  ContextPacket,
+  ContextNeed,
+  StepType,
 } from '@smallseedlabs/proba-protocol';
 
 export interface User {
@@ -129,8 +132,19 @@ export interface BrainGoalUpdate {
   };
 }
 
+/** Result of one brain.process call; needs trigger a hybrid bridge rebuild. */
+export interface BrainStepResult {
+  outputs: BrainOutput[];
+  /** Typed context needs for another bridge round (same step). */
+  needs?: ContextNeed[];
+}
+
 export interface BrainPort {
-  process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[]>;
+  /**
+   * Run one brain step. May return a bare output list or `{ outputs, needs? }`.
+   * When `needs` is set the Hub rebuilds context via the bridge and calls again.
+   */
+  process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[] | BrainStepResult>;
   /**
    * Goal update produced by the last process() call for this thread, if any.
    * Returned once (consumed). Optional: brains that do not track goals omit it.
@@ -145,6 +159,25 @@ export interface BrainContext {
   messages?: Message[];
   goals?: Goal[];
   client: PoolClient;
+  /**
+   * Packet from the context bridge for this step. When the bridge feature flag
+   * is on this is the brain's only context input (legacy messages/goals are omitted).
+   */
+  contextPacket?: ContextPacket;
+  /** Stable id for this brain step (also sent to the bridge as ContextRequest.stepId). */
+  stepId?: string;
+  stepType?: StepType;
+  /** How many hybrid needs rounds have already run for this step (0 = first packet). */
+  needsRound?: number;
+}
+
+/** Normalize a brain.process return value to a BrainStepResult. */
+export function normalizeBrainStepResult(result: BrainOutput[] | BrainStepResult): BrainStepResult {
+  if (Array.isArray(result)) return { outputs: result };
+  return {
+    outputs: Array.isArray(result.outputs) ? result.outputs : [],
+    ...(result.needs?.length ? { needs: result.needs } : {}),
+  };
 }
 
 export interface SSEConnection {

@@ -5,8 +5,9 @@ import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import { BaseBrainPort } from './port.js';
 import { logger } from '../logger.js';
-import type { BrainContext, BrainGoalUpdate } from '../types.js';
-import type { CommandEnvelope, BrainOutput } from '@smallseedlabs/proba-protocol';
+import type { BrainContext, BrainGoalUpdate, BrainStepResult } from '../types.js';
+import type { CommandEnvelope, BrainOutput, ContextNeed } from '@smallseedlabs/proba-protocol';
+import { contextNeedSchema } from '@smallseedlabs/proba-protocol';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -21,8 +22,17 @@ interface ScenarioTrigger {
 interface ScenarioStep {
   trigger: ScenarioTrigger;
   outputs: BrainOutput[];
+  /** Optional hybrid needs: Hub rebuilds context via the bridge before the next process call. */
+  needs?: ContextNeed[];
   /** Optional goal progress/metrics reported when this step runs (mock only). */
   goal?: BrainGoalUpdate;
+  /**
+   * When set, this step only matches when the packet has (or lacks) a gap with this code.
+   * Used so scenarios can choose clarify vs decide from bridge gaps.
+   */
+  requireGap?: string;
+  /** When true, the step matches only if the packet has no gaps. */
+  requireNoGaps?: boolean;
 }
 
 interface Scenario {
@@ -106,19 +116,21 @@ export class MockBrain extends BaseBrainPort {
     }
   }
 
-  async process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[]> {
+  async process(command: CommandEnvelope, context: BrainContext): Promise<BrainOutput[] | BrainStepResult> {
     const threadId = context.threadId || 'default';
     const state = this.getThreadState(threadId, command);
     const scenario = await this.loadScenario(state.scenarioName);
     state.pendingGoalUpdate = undefined;
 
     logger.info(
-      { 
+      {
         scenario: state.scenarioName,
         threadId,
         commandType: command.type,
         stepIndex: state.stepIndex,
-        clarificationRound: state.clarificationRound
+        clarificationRound: state.clarificationRound,
+        hasPacket: Boolean(context.contextPacket),
+        needsRound: context.needsRound ?? 0,
       },
       'MockBrain processing command'
     );
@@ -143,41 +155,61 @@ export class MockBrain extends BaseBrainPort {
 
     for (let i = state.stepIndex; i < scenario.steps.length; i++) {
       const step = scenario.steps[i];
-      
-      const matches = this.matchesTrigger(step.trigger, command, state);
-      logger.debug({
-        stepIndex: i,
-        trigger: step.trigger,
-        commandType: command.type,
-        commandPayload: command.payload,
-        matches
-      }, 'Checking trigger match');
-      
+
+      const matches =
+        this.matchesTrigger(step.trigger, command, state) && this.matchesPacket(step, context);
+      logger.debug(
+        {
+          stepIndex: i,
+          trigger: step.trigger,
+          commandType: command.type,
+          commandPayload: command.payload,
+          matches,
+        },
+        'Checking trigger match'
+      );
+
       if (matches) {
         state.stepIndex = i + 1;
         state.pendingGoalUpdate = step.goal;
-        
-        const outputs = step.outputs.map(output => {
+
+        const outputs = (step.outputs ?? []).map((output) => {
           if (output.type === 'clarify' && 'expiresIn' in output) {
             const { expiresIn: _expiresIn, onExpire: _onExpire, ...rest } = output as Record<string, unknown>;
             return rest as unknown as BrainOutput;
           }
           return output;
         });
-        
+
+        const needs = this.parseNeeds(step.needs);
+
         logger.info(
-          { 
+          {
             scenario: state.scenarioName,
-            step: i, 
+            step: i,
             trigger: step.trigger,
             outputCount: outputs.length,
-            outputTypes: outputs.map(o => o.type)
-          }, 
+            outputTypes: outputs.map((o) => o.type),
+            needCount: needs?.length ?? 0,
+          },
           'Matched scenario step'
         );
-        
+
+        if (needs?.length) return { outputs, needs };
         return outputs;
       }
+    }
+
+    // Packet gaps can drive clarify when no scenario step matched.
+    const gap = context.contextPacket?.gaps?.[0];
+    if (gap?.suggestedQuestion) {
+      return [
+        {
+          type: 'clarify',
+          reason: gap.reason || gap.code,
+          questions: [{ id: 'gap', text: gap.suggestedQuestion, type: 'text' }],
+        },
+      ];
     }
 
     return [
@@ -186,6 +218,25 @@ export class MockBrain extends BaseBrainPort {
         text: 'Understood. Processing your request.',
       },
     ];
+  }
+
+  private parseNeeds(raw: unknown): ContextNeed[] | undefined {
+    if (!Array.isArray(raw) || raw.length === 0) return undefined;
+    const needs: ContextNeed[] = [];
+    for (const item of raw) {
+      const parsed = contextNeedSchema.safeParse(item);
+      if (parsed.success) needs.push(parsed.data);
+    }
+    return needs.length > 0 ? needs : undefined;
+  }
+
+  private matchesPacket(step: ScenarioStep, context: BrainContext): boolean {
+    const gaps = context.contextPacket?.gaps ?? [];
+    if (step.requireNoGaps && gaps.length > 0) return false;
+    if (step.requireGap) {
+      return gaps.some((g) => g.code === step.requireGap);
+    }
+    return true;
   }
 
   private matchesTrigger(trigger: ScenarioTrigger, command: CommandEnvelope, state: ThreadState): boolean {

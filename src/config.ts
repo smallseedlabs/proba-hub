@@ -45,6 +45,27 @@ function envNumber(name: string, fallback: number): number {
   return process.env[name]?.trim() && Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+export const CONTEXT_BRIDGE_ON_FAILURES = ['clarify', 'hold'] as const;
+export type ContextBridgeOnFailure = (typeof CONTEXT_BRIDGE_ON_FAILURES)[number];
+
+function envContextBridgeOnFailure(): ContextBridgeOnFailure {
+  const raw = process.env.CONTEXT_BRIDGE_ON_FAILURE?.trim().toLowerCase();
+  if (!raw) return 'clarify';
+  if ((CONTEXT_BRIDGE_ON_FAILURES as readonly string[]).includes(raw)) return raw as ContextBridgeOnFailure;
+  throw new Error(
+    `CONTEXT_BRIDGE_ON_FAILURE must be one of ${CONTEXT_BRIDGE_ON_FAILURES.join(', ')} (got "${raw}")`
+  );
+}
+
+/** Default: on when CONTEXT_BRIDGE_URL is set; explicit CONTEXT_BRIDGE_ENABLED wins. */
+function envContextBridgeEnabled(): boolean {
+  const raw = process.env.CONTEXT_BRIDGE_ENABLED?.trim().toLowerCase();
+  if (raw !== undefined && raw !== '') {
+    return !['false', '0', 'no', 'off'].includes(raw);
+  }
+  return (process.env.CONTEXT_BRIDGE_URL || '').trim() !== '';
+}
+
 /** A secret from `<NAME>_FILE` (a mounted secret) or `<NAME>`; the file wins. Never logged. */
 function envSecret(name: string): string {
   const filePath = process.env[`${name}_FILE`]?.trim();
@@ -158,14 +179,20 @@ export const config = {
   
   /**
    * Context bridge: act-as assertion minting, context-reader internal reads, and
-   * the ContextClient HTTP adapter. The brain is not wired to the client yet.
+   * the ContextClient wired into every brain step (brief 07).
    */
   contextBridge: {
-    /** Base URL of the context bridge (e.g. http://127.0.0.1:3500). Empty = client disabled. */
+    /**
+     * Feature flag. When false the brain keeps the legacy in-Hub context (local
+     * development only). Production refuses to start with this off.
+     * Default: on when CONTEXT_BRIDGE_URL is set.
+     */
+    enabled: envContextBridgeEnabled(),
+    /** Base URL of the context bridge (e.g. http://127.0.0.1:3500). Required in production. */
     url: (process.env.CONTEXT_BRIDGE_URL || '').trim().replace(/\/+$/, ''),
     /** Accept the context-reader role on /v1/internal/* (requires key files). */
     contextReaderEnabled: envBool('HUB_CONTEXT_READER_ENABLED', false),
-    /** PKCS#8 PEM used to mint act-as assertions. Required in production when CONTEXT_BRIDGE_URL is set. */
+    /** PKCS#8 PEM used to mint act-as assertions. Required in production when the bridge is enabled. */
     assertionPrivateKeyFile: (process.env.HUB_ASSERTION_PRIVATE_KEY_FILE || '').trim(),
     /** Key id stamped in the JWT header when minting. */
     assertionKeyId: (process.env.HUB_ASSERTION_KEY_ID || '').trim(),
@@ -181,6 +208,13 @@ export const config = {
     openMs: envInt('CONTEXT_BRIDGE_CIRCUIT_OPEN_MS', 30_000),
     /** Cap on GET /v1/internal/threads/{id}/messages?limit=. */
     messagesLimitCap: envInt('HUB_INTERNAL_MESSAGES_LIMIT_CAP', 100),
+    /** Max hybrid needs rounds per step (brain asks, Hub rebuilds). Default 2. */
+    maxNeedRounds: envInt('CONTEXT_BRIDGE_MAX_NEED_ROUNDS', 2),
+    /**
+     * When the bridge is unreachable or errors: `clarify` asks the user; `hold`
+     * stores no brain output for the step. Never falls back to an in-process builder.
+     */
+    onFailure: envContextBridgeOnFailure(),
   },
 
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */

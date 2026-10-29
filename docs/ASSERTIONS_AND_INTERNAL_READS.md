@@ -85,8 +85,10 @@ Every successful internal read is recorded as `context.source_fetched` with acto
 `service:context-reader` and details `caller`, `assertionJti`, `tokenJti`, `operation`
 and counts — never message text. Refusals are `auth.denied`.
 
-## ContextClient (not wired to the brain yet)
+## ContextClient (wired into every brain step)
 
 `src/brain/context-client.ts` defines the port; `HttpContextClient` calls
 `POST {CONTEXT_BRIDGE_URL}/v1/context/build` with timeouts and a circuit breaker.
-Brief 07 wires it into the brain step loop.
+The command processor mints an act-as assertion, attaches the packet
+(`brain.context_attached`), and runs an optional hybrid needs loop. See
+[Brain ↔ context bridge](BRAIN_CONTEXT_BRIDGE.md).
