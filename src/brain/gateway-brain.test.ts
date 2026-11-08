@@ -7,6 +7,8 @@ import { GatewayBrain } from './gateway-brain.js';
 import { GatewayClientError, type GatewayClient, type GatewayRunRequest, type GatewayRunSnapshot } from './gateway-client.js';
 import { MemoryGatewayRunStore } from './gateway-run-store.js';
 import { shouldAttachHubContext, controlAbortReason } from './gateway-wiring.js';
+import { FAKE_RESEARCH_GATEWAY_LABEL, FakeResearchGatewayClient } from '../testing/fake-research-gateway.js';
+import { RESEARCH_ACCEPT_VERB } from '@smallseedlabs/proba-protocol';
 
 const userId = '660e8400-e29b-41d4-a716-446655440001';
 const otherUser = '661e8400-e29b-41d4-a716-446655440099';
@@ -306,6 +308,82 @@ describe('GatewayBrain', () => {
       code: 'unauthorized',
     });
     await expect(closed.process(command('send_message', { text: 'hi' }), context())).rejects.not.toThrow(/svc\.jwt/);
+  });
+
+  it('forwards operator userSuppliedInput + pending goal/thread, never a model URL', async () => {
+    const landing = 'https://operator-entered.example/path';
+    const fake = new FakeResearchGatewayClient();
+    const pendingGoal = randomUUID();
+    const brain = makeBrain(fake);
+    const outputs = await brain.process(
+      command('create_goal', {
+        title: 'Launch',
+        userSuppliedInput: { landingPageUrl: landing },
+        text: 'ignore https://model-invented.example',
+      }),
+      context({ pendingGoalId: pendingGoal, userSuppliedInput: { landingPageUrl: landing } })
+    );
+    expect(fake.label).toBe(FAKE_RESEARCH_GATEWAY_LABEL);
+    expect(fake.calls[0]?.workspaceId).toBe('seedbed');
+    expect(fake.calls[0]?.userId).toBe(userId);
+    expect(fake.calls[0]?.goalId).toBe(pendingGoal);
+    expect(fake.calls[0]?.threadId).toBe(threadId);
+    expect(fake.calls[0]?.userSuppliedInput).toEqual({ landingPageUrl: landing });
+    expect(JSON.stringify(fake.calls[0]?.userSuppliedInput)).not.toMatch(/smallseedlabs\.com|model-invented/);
+    expect(outputs[0]).toMatchObject({ type: 'tool_call', tool: RESEARCH_ACCEPT_VERB, needsApproval: true });
+    expect((outputs[0] as { researchReview?: { landingPageUrl: string } }).researchReview?.landingPageUrl).toBe(landing);
+
+    const invented = fakeClient(() => ({
+      runId: randomUUID(),
+      status: 'completed',
+      iteration: 0,
+      outputs: [{ type: 'reply', text: 'ok' }],
+    }));
+    await makeBrain(invented).process(command('send_message', { text: `use ${landing}` }), context());
+    expect(invented.calls[0]?.userSuppliedInput).toBeUndefined();
+  });
+
+  it('resumes research_review on the bound run and regathers a new URL after edit', async () => {
+    const landing = 'https://operator-entered.example/path';
+    const next = 'https://operator-entered.example/new-path';
+    const fake = new FakeResearchGatewayClient();
+    const store = new MemoryGatewayRunStore();
+    const brain = makeBrain(fake, { store });
+    const first = await brain.process(
+      command('create_goal', { title: 'Launch', userSuppliedInput: { landingPageUrl: landing } }),
+      context({ pendingGoalId: goalId, userSuppliedInput: { landingPageUrl: landing } })
+    );
+    const askId = (first[0] as { askId?: string }).askId;
+    expect(askId).toBeTruthy();
+    expect(fake.calls[0]?.userSuppliedInput?.landingPageUrl).toBe(landing);
+
+    const restarted = makeBrain(fake, { store });
+    const edited = await restarted.process(
+      command('answer_ask', {
+        askId,
+        choice: 'edit',
+        askType: 'research_review',
+        researchAcceptance: {
+          artifactId: (first[0] as { researchReview?: { artifactId: string } }).researchReview?.artifactId,
+          version: 1,
+          inputRevision: (first[0] as { researchReview?: { inputRevision: string } }).researchReview?.inputRevision,
+        },
+        userSuppliedInput: { landingPageUrl: next },
+      }),
+      context()
+    );
+    expect(fake.calls[1]?.idempotencyKey).toBe(fake.calls[0]?.idempotencyKey);
+    expect(fake.calls[1]?.resume).toMatchObject({ askId, choice: 'edit' });
+    expect(fake.calls[1]?.userSuppliedInput?.landingPageUrl).toBe(landing);
+    expect(fake.calls[2]?.userSuppliedInput?.landingPageUrl).toBe(next);
+    expect(fake.calls[2]?.idempotencyKey).not.toBe(fake.calls[0]?.idempotencyKey);
+    expect(fake.calls[2]?.resume).toBeUndefined();
+    expect((edited[0] as { researchReview?: { landingPageUrl: string; inputRevision: string } }).researchReview?.landingPageUrl).toBe(
+      next
+    );
+    expect((edited[0] as { researchReview?: { inputRevision: string } }).researchReview?.inputRevision).not.toBe(
+      (first[0] as { researchReview?: { inputRevision: string } }).researchReview?.inputRevision
+    );
   });
 
   it('does not treat Ads-blocked snapshots as success', async () => {

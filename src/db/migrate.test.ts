@@ -13,5 +13,6 @@ describe('migration list', () => {
     expect(migrations.find((m) => m.name === 'audit_outbox')?.file).toBe('004_audit_outbox.sql');
     expect(migrations.find((m) => m.name === 'execution_state')?.file).toBe('005_execution_state.sql');
     expect(migrations.find((m) => m.name === 'gateway_runs')?.file).toBe('006_gateway_runs.sql');
+    expect(migrations.find((m) => m.name === 'research_review')?.file).toBe('007_research_review.sql');
   });
 });

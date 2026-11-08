@@ -27,3 +27,9 @@ only `specific` actions:
 ```json
 "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.3.1"
 ```
+
+Research review (0.6.0) is not tagged. Pin the immutable protocol PR23 head SHA (package 0.6.0, Zod 4.6.7; research fields since 0.5.0). There is **no** `v0.6.0` tag.
+
+```json
+"@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#298eeb4b4ba3fe14b4bf5077810ce2f433067984"
+```

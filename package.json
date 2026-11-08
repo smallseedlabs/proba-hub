@@ -18,7 +18,7 @@
     "test:ci": "NODE_ENV=test vitest run --reporter=default --reporter=json --outputFile.json=test-reports/unit.json && node scripts/assert-test-report.mjs test-reports/unit.json",
     "test:watch": "NODE_ENV=test vitest",
     "test:integration": "NODE_ENV=test vitest run --config vitest.integration.config.ts",
-    "test:integration:ci": "NODE_ENV=test vitest run --config vitest.integration.config.ts --reporter=default --reporter=json --outputFile.json=test-reports/integration.json && node scripts/assert-test-report.mjs test-reports/integration.json \"src/sse.integration.test.ts:replay via Last-Event-ID\" \"src/sse.integration.test.ts:heartbeat\" \"src/sse.integration.test.ts:listener cleanup\" \"src/api.integration.test.ts:Event Sequence Integrity (concurrency)\" \"src/audit.integration.test.ts:written in the action\" \"src/audit.integration.test.ts:one traceId per /v1/commands request\" \"src/audit.integration.test.ts:audit relay publishes\" \"src/db/migrate.integration.test.ts:applies 004 on top\"",
+    "test:integration:ci": "NODE_ENV=test vitest run --config vitest.integration.config.ts --reporter=default --reporter=json --outputFile.json=test-reports/integration.json && node scripts/assert-test-report.mjs test-reports/integration.json \"src/sse.integration.test.ts:replay via Last-Event-ID\" \"src/sse.integration.test.ts:heartbeat\" \"src/sse.integration.test.ts:listener cleanup\" \"src/api.integration.test.ts:Event Sequence Integrity (concurrency)\" \"src/audit.integration.test.ts:written in the action\" \"src/audit.integration.test.ts:one traceId per /v1/commands request\" \"src/audit.integration.test.ts:audit relay publishes\" \"src/db/migrate.integration.test.ts:applies 004 on top\" \"src/research-review.integration.test.ts:Web-shaped create_goal\" \"src/research-review.integration.test.ts:stale researchAcceptance\" \"src/research-review.integration.test.ts:wrong actor\"",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "validate:scenarios": "tsx scripts/validate-scenarios.ts",
@@ -41,7 +41,7 @@
     "@fastify/cors": "^9.0.1",
     "@fastify/jwt": "^8.0.1",
     "@fastify/rate-limit": "^9.1.0",
-    "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#v0.4.0",
+    "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#298eeb4b4ba3fe14b4bf5077810ce2f433067984",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "jose": "^6.2.14",
@@ -50,7 +50,7 @@
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
     "redis": "^4.7.0",
-    "zod": "^3.23.8"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

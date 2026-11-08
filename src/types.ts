@@ -43,6 +43,8 @@ export interface Ask {
   risk: string;
   costEffect?: Record<string, unknown>;
   questions: Record<string, unknown>[];
+  /** Displayed research_review body when askType is research_review. */
+  research?: Record<string, unknown>;
   status: string;
   expiresAt?: Date;
   onExpire?: string;
@@ -101,6 +103,10 @@ export interface Goal {
   status: string;
   progress?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
+  /** Original operator userSuppliedInput; never a model-invented URL. */
+  userSuppliedInput?: { landingPageUrl: string };
+  /** Opaque gateway inputRevision for the current operator URL. */
+  inputRevision?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -178,6 +184,13 @@ export interface BrainContext {
   stepType?: StepType;
   /** How many hybrid needs rounds have already run for this step (0 = first packet). */
   needsRound?: number;
+  /** Pre-allocated goal id for create_goal so the gateway run is bound before the row exists. */
+  pendingGoalId?: string;
+  /**
+   * Operator-entered landing URL from the command or persisted goal.
+   * Auth workspace/user come from the session, not from this object.
+   */
+  userSuppliedInput?: { landingPageUrl: string };
 }
 
 /** Normalize a brain.process return value to a BrainStepResult. */

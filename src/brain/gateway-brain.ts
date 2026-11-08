@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { isBrainOutput, type BrainOutput, type CommandEnvelope, type StepType } from '@smallseedlabs/proba-protocol';
+import {
+  RESEARCH_ACCEPT_VERB,
+  isBrainOutput,
+  type BrainOutput,
+  type CommandEnvelope,
+  type StepType,
+} from '@smallseedlabs/proba-protocol';
 import type { AssertionMinter } from '../auth/assertions/mint.js';
 import type { GatewayTokenMinter } from '../auth/gateway-token.js';
 import { currentTrace } from '../audit/trace.js';
 import { logger } from '../logger.js';
+import { userSuppliedInputFromCommand } from '../research/user-input.js';
 import type { BrainContext, BrainPort, GatewayAbortReason } from '../types.js';
 import { BaseBrainPort } from './port.js';
 import type { GatewayClient, GatewayRunRequest, GatewayRunSnapshot } from './gateway-client.js';
@@ -14,6 +21,7 @@ import {
   type GatewayRunRecord,
   type GatewayRunStore,
 } from './gateway-run-store.js';
+import { researchReviewFromSnapshot } from './research-snapshot.js';
 import { mapCommandToStepType } from './step-type.js';
 
 export interface GatewayBrainAudit {
@@ -44,7 +52,7 @@ export interface GatewayBrainOptions {
   budget?: Record<string, unknown>;
 }
 
-const RESUME_ASK_TYPES = new Set(['action_approval', 'plan_approval']);
+const RESUME_ASK_TYPES = new Set(['action_approval', 'plan_approval', 'research_review']);
 
 export class GatewayBrain extends BaseBrainPort implements BrainPort {
   readonly ownsExternalContext = true;
@@ -57,7 +65,7 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
     const workspaceId = this.options.workspaceId;
     const userId = context.userId;
     const threadId = context.threadId ?? command.threadId;
-    const goalId = context.goals?.[context.goals.length - 1]?.id;
+    const goalId = context.pendingGoalId ?? context.goals?.[context.goals.length - 1]?.id;
     const token = await this.options.serviceTokens.mint({
       workspaceId,
       ttlSeconds: this.options.tokenTtlSeconds,
@@ -97,6 +105,22 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       'gateway run finished'
     );
 
+    const nextUrl = resume?.choice === 'edit' ? userSuppliedInputFromCommand(command) : undefined;
+    if (nextUrl && pending) {
+      const gathered = await this.regatherAfterEdit({
+        token,
+        pending,
+        nextUrl,
+        command,
+        ids: { workspaceId, userId, threadId, goalId },
+      });
+      return this.outputsOrThrow(gathered);
+    }
+
+    return this.outputsOrThrow(snapshot);
+  }
+
+  private outputsOrThrow(snapshot: GatewayRunSnapshot): BrainOutput[] {
     if (snapshot.status === 'awaiting_approval' || snapshot.status === 'completed') {
       return outputsOf(snapshot);
     }
@@ -112,6 +136,63 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       return outputsOf(snapshot);
     }
     throw new GatewayClientError('gateway_error', `gateway run status ${snapshot.status} is not a Hub brain result`);
+  }
+
+  /**
+   * Edit invalidates the bound artifact on the original run (same fingerprint /
+   * userSuppliedInput). A new operator URL is a new input revision: Hub starts a
+   * new run rather than changing the URL on the resumed idempotency key.
+   */
+  private async regatherAfterEdit(input: {
+    token: string;
+    pending: GatewayRunRecord;
+    nextUrl: { landingPageUrl: string };
+    command: CommandEnvelope;
+    ids: { workspaceId: string; userId: string; threadId?: string; goalId?: string };
+  }): Promise<GatewayRunSnapshot> {
+    const original = durableGatewayRequest(input.pending.request);
+    const originalCommand =
+      original.command && typeof original.command === 'object' && !Array.isArray(original.command)
+        ? (original.command as CommandEnvelope)
+        : input.command;
+    const originalPayload =
+      originalCommand.payload && typeof originalCommand.payload === 'object' && !Array.isArray(originalCommand.payload)
+        ? (originalCommand.payload as Record<string, unknown>)
+        : {};
+    const nextRequest: GatewayRunRequest = {
+      ...original,
+      traceId: currentTrace()?.traceId ?? input.command.clientMsgId,
+      workspaceId: input.ids.workspaceId,
+      userId: input.ids.userId,
+      ...(input.ids.goalId ? { goalId: input.ids.goalId } : {}),
+      ...(input.ids.threadId ? { threadId: input.ids.threadId } : {}),
+      stepId: randomUUID(),
+      stepType: 'interpret_message',
+      command: {
+        ...originalCommand,
+        clientMsgId: input.command.clientMsgId,
+        payload: { ...originalPayload, userSuppliedInput: input.nextUrl },
+      },
+      idempotencyKey: input.command.clientMsgId,
+      userSuppliedInput: input.nextUrl,
+    };
+    const snapshot = await this.options.client.createRun(nextRequest, input.token);
+    await this.options.store.upsert({
+      workspaceId: input.ids.workspaceId,
+      userId: input.ids.userId,
+      idempotencyKey: nextRequest.idempotencyKey,
+      runId: snapshot.runId,
+      ...(input.ids.goalId ? { goalId: input.ids.goalId } : {}),
+      ...(input.ids.threadId ? { threadId: input.ids.threadId } : {}),
+      askId: approvalAskIdFromSnapshot(snapshot),
+      status: snapshot.status,
+      request: nextRequest,
+    });
+    logger.info(
+      { userId: input.ids.userId, threadId: input.ids.threadId, runId: snapshot.runId, status: snapshot.status },
+      'gateway re-gather after research edit'
+    );
+    return snapshot;
   }
 
   async cancelActive(reason: GatewayAbortReason, context: { userId: string; threadId?: string }): Promise<void> {
@@ -202,6 +283,7 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
     const stepType = (context.stepType ?? mapCommandToStepType(command)) as StepType;
     const stepId = context.stepId ?? randomUUID();
     const traceId = currentTrace()?.traceId ?? command.clientMsgId;
+    const userSuppliedInput = context.userSuppliedInput ?? userSuppliedInputFromCommand(command);
     return {
       traceId,
       workspaceId: ids.workspaceId,
@@ -212,6 +294,7 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       stepType,
       command: scopedCommand(command, ids.workspaceId),
       idempotencyKey: command.clientMsgId,
+      ...(userSuppliedInput ? { userSuppliedInput } : {}),
       ...(this.options.budget ? { budget: this.options.budget } : {}),
     };
   }
@@ -282,23 +365,27 @@ function scopedCommand(command: CommandEnvelope, workspaceId: string): CommandEn
 
 function outputsOf(snapshot: GatewayRunSnapshot): BrainOutput[] {
   const askId = approvalAskIdFromSnapshot(snapshot);
+  const researchReview = researchReviewFromSnapshot(snapshot);
   const raw = snapshot.outputs ?? [];
   const outputs = raw
     .filter((item): item is BrainOutput => isBrainOutput(item))
-    .map((item) =>
-      askId && item.type === 'tool_call' && 'needsApproval' in item && item.needsApproval
-        ? { ...item, askId }
-        : item
-    );
+    .map((item) => {
+      if (!(askId && item.type === 'tool_call' && 'needsApproval' in item && item.needsApproval)) return item;
+      if (item.tool === RESEARCH_ACCEPT_VERB) {
+        return { ...item, askId, ...(researchReview ? { researchReview } : {}) };
+      }
+      return { ...item, askId };
+    });
   if (askId && snapshot.status === 'awaiting_approval' && !outputs.some((item) => item.type === 'tool_call')) {
     const verb = firstApprovalVerb(snapshot);
     outputs.push({
       type: 'tool_call',
       tool: verb,
-      parameters: {},
+      parameters: researchReview && verb === RESEARCH_ACCEPT_VERB ? { ...researchReview } : {},
       needsApproval: true,
-      risk: 'medium',
+      risk: verb === RESEARCH_ACCEPT_VERB ? 'high' : 'medium',
       askId,
+      ...(researchReview && verb === RESEARCH_ACCEPT_VERB ? { researchReview } : {}),
     } as BrainOutput);
   }
   return outputs;

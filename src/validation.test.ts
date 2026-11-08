@@ -46,6 +46,24 @@ describe('Command Validation', () => {
       expect(result.success).toBe(true);
     });
 
+    it('accepts optional create_goal userSuppliedInput and rejects a default-looking extra key', async () => {
+      const { validateCommandPayload } = await import('@smallseedlabs/proba-protocol');
+      expect(
+        validateCommandPayload('create_goal', {
+          title: 'Launch',
+          userSuppliedInput: { landingPageUrl: 'https://operator-entered.example/path' },
+        })
+      ).toBe(true);
+      expect(validateCommandPayload('create_goal', { title: 'Launch' })).toBe(true);
+      expect(
+        validateCommandPayload('create_goal', {
+          title: 'Launch',
+          userSuppliedInput: { landingPageUrl: 'https://operator-entered.example/path', workspaceId: 'seedbed' },
+        })
+      ).toBe(false);
+      expect(JSON.stringify({ title: 'Launch' })).not.toMatch(/smallseedlabs\.com/);
+    });
+
     it('should validate a valid control command', () => {
       const command = {
         kind: 'command',

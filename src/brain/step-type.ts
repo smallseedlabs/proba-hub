@@ -78,6 +78,8 @@ export function mapCommandToStepType(
         String((command.payload as { askType?: unknown } | null)?.askType ?? '');
       if (type === 'clarify') return 'clarify';
       if (type === 'action_approval' || type === 'plan_approval') return 'handle_approval';
+      // research_review resume reuses the original run; a follow-up gather uses interpret_message.
+      if (type === 'research_review') return 'interpret_message';
       return 'clarify';
     }
     case 'explain':

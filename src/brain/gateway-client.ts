@@ -32,6 +32,11 @@ export interface GatewayRunRequest {
   actAsAssertion?: string;
   idempotencyKey: string;
   budget?: Record<string, unknown>;
+  /**
+   * Operator-entered landing URL from Hub session/goal persistence.
+   * Never taken from model/tool text. Omitted is valid; gather/create fail closed.
+   */
+  userSuppliedInput?: { landingPageUrl: string };
   resume?: {
     askId: string;
     choice: 'approve' | 'reject' | 'edit';
