@@ -13,14 +13,14 @@ import { startOutboxRelay, stopOutboxRelay } from './services/outbox-relay.js';
 import { startAuditRelay, stopAuditRelay } from './audit/relay.js';
 import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
-import { createBrain } from './brain/factory.js';
+import { createRuntimeBrain } from './brain/factory.js';
 import type { BrainPort } from './types.js';
 import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
 import type { ContextClient } from './brain/context-client.js';
 import { createContextClient } from './brain/http-context-client.js';
-import { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
+import { assertContextBridgeProductionGuards, assertGatewayGuards } from './brain/context-bridge-guards.js';
 
-export { assertContextBridgeProductionGuards } from './brain/context-bridge-guards.js';
+export { assertContextBridgeProductionGuards, assertGatewayGuards } from './brain/context-bridge-guards.js';
 
 export interface AppOptions {
   /** Start outbox relay + ask expiry jobs (default true). */
@@ -61,13 +61,14 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const fastify = await createServer();
 
   assertContextBridgeProductionGuards();
+  assertGatewayGuards();
 
   const brain =
     options.brain ??
-    createBrain({
+    (await createRuntimeBrain({
       provider: options.brainProvider ?? (options.brainScenario ? 'mock' : undefined),
       scenario: options.brainScenario,
-    });
+    }));
 
   const assertionAuth =
     options.assertionAuth ??

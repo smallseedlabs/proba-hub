@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Hub→gateway orchestration (opt-in, default off): when `GATEWAY_URL` is enabled, Hub posts
+  tenant-scoped runs to `proba-llm-gateway` instead of mock/DeepSeek. Durable `gateway_runs`
+  rows bind original command + idempotencyKey + askId across restart, scoped to
+  workspace/user/goal/thread/run. Pause/kill cancel every cancellable run for that workspace
+  user. Unconfigured or failed gateway is fail-closed (no silent model fallback). See `.env.example`.
 - Context bridge support (brief 05): EdDSA act-as assertion minting (`HUB_ASSERTION_PRIVATE_KEY_FILE`),
   public JWKS at `GET /v1/.well-known/assertion-keys`, `context-reader` internal reads
   (`GET /v1/internal/goals/{goalId}/state`, `GET /v1/internal/threads/{threadId}/messages`,

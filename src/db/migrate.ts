@@ -22,6 +22,7 @@ export const migrations: Migration[] = [
   { id: 3, name: 'firebase_auth', file: '003_firebase_auth.sql' },
   { id: 4, name: 'audit_outbox', file: '004_audit_outbox.sql' },
   { id: 5, name: 'execution_state', file: '005_execution_state.sql' },
+  { id: 6, name: 'gateway_runs', file: '006_gateway_runs.sql' },
 ];
 
 async function ensureMigrationsTable(): Promise<void> {

@@ -139,6 +139,8 @@ export interface BrainStepResult {
   needs?: ContextNeed[];
 }
 
+export type GatewayAbortReason = 'hub_cancel' | 'hub_pause' | 'emergency_stop';
+
 export interface BrainPort {
   /**
    * Run one brain step. May return a bare output list or `{ outputs, needs? }`.
@@ -150,6 +152,13 @@ export interface BrainPort {
    * Returned once (consumed). Optional: brains that do not track goals omit it.
    */
   takeGoalUpdate?(threadId: string): BrainGoalUpdate | undefined;
+  /**
+   * When true the Hub must not call the context bridge or a local LLM before
+   * process(): the gateway owns context enrichment, preflight and the tool loop.
+   */
+  ownsExternalContext?: boolean;
+  /** Abort an in-flight gateway run. Pause/kill never grant approvals. */
+  cancelActive?(reason: GatewayAbortReason, context: { userId: string; threadId?: string }): Promise<void>;
 }
 
 export interface BrainContext {

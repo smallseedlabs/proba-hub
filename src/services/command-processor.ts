@@ -25,6 +25,8 @@ import {
   runBrainWithBridge,
   type ContextBridgeRuntime,
 } from '../brain/context-attach.js';
+import { controlAbortReason, shouldAttachHubContext } from '../brain/gateway-wiring.js';
+import { applyBoundAskId, askIdFromBrainOutput } from '../brain/gateway-ask-identity.js';
 import {
   lockExecutionState,
   nextExecutionState,
@@ -527,7 +529,7 @@ export class CommandProcessor {
     let held = false;
 
     try {
-      if (this.bridge?.enabled) {
+      if (shouldAttachHubContext(Boolean(this.bridge?.enabled), this.brain)) {
         const result = await runInSpan(span, () =>
           runBrainWithBridge({
             runtime: this.bridge!,
@@ -1097,6 +1099,8 @@ export class CommandProcessor {
     const seq = await this.getNextSeq(client, userId);
     
     const eventEnvelope = mapBrainOutputToEvent(output, { seq, threadId });
+    const boundAskId = askIdFromBrainOutput(output);
+    if (boundAskId) applyBoundAskId(eventEnvelope, boundAskId);
     
     let uiPayloadId: string | undefined;
     if ('ui' in eventEnvelope && eventEnvelope.ui) {
@@ -1527,6 +1531,18 @@ export class CommandProcessor {
       );
     }
     await this.auditProcessed(client, scope, startedAt, [event], 'success');
+
+    const abortReason = controlAbortReason(payload.action);
+    if (abortReason && this.brain.cancelActive) {
+      try {
+        await this.brain.cancelActive(abortReason, { userId, threadId: envelope.threadId });
+      } catch (error) {
+        logger.warn(
+          { err: error instanceof Error ? error.name : 'error', userId, action: payload.action },
+          'gateway cancel after Hub control failed; Hub execution state already persisted'
+        );
+      }
+    }
 
     return { command, events: [event] };
   }
