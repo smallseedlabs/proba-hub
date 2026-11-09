@@ -23,6 +23,7 @@ import {
   validateResearchReviewAsk,
 } from '@smallseedlabs/proba-protocol';
 import { researchReviewFromBrainOutput } from '../brain/research-snapshot.js';
+import { parseApprovedCreative, parseApprovedTargeting } from '../analytics/creative.js';
 import {
   userSuppliedInputFromCommand,
   userSuppliedInputFromCreateGoal,
@@ -1149,14 +1150,21 @@ export class CommandProcessor {
         `SELECT id, user_id as "userId", thread_id as "threadId", title, description,
                 constraints, budget, status, progress, metrics,
                 user_supplied_input as "userSuppliedInput", input_revision as "inputRevision",
+                approved_creative as "approvedCreative", approved_targeting as "approvedTargeting",
                 created_at as "createdAt", updated_at as "updatedAt"
          FROM goals WHERE thread_id = $1`,
         [threadId]
       );
-      goals = goalsResult.rows.map((row) => ({
-        ...row,
-        userSuppliedInput: userSuppliedInputFromUnknown(row.userSuppliedInput),
-      }));
+      goals = goalsResult.rows.map((row) => {
+        const creative = parseApprovedCreative(row.approvedCreative);
+        const targeting = parseApprovedTargeting(row.approvedTargeting);
+        return {
+          ...row,
+          userSuppliedInput: userSuppliedInputFromUnknown(row.userSuppliedInput),
+          approvedCreative: creative.ok ? creative.creative : undefined,
+          approvedTargeting: targeting.ok ? targeting.targeting : undefined,
+        };
+      });
     }
 
     return { userId, threadId, thread, messages, goals, client };
@@ -1173,9 +1181,18 @@ export class CommandProcessor {
   ): void {
     if (pendingGoalId) context.pendingGoalId = pendingGoalId;
     const fromCommand = userSuppliedInputFromCommand(envelope);
-    const fromGoal = context.goals?.[context.goals.length - 1]?.userSuppliedInput;
+    const goal = context.goals?.[context.goals.length - 1];
+    const fromGoal = goal?.userSuppliedInput;
     const userSuppliedInput = fromCommand ?? fromGoal;
-    if (userSuppliedInput) context.userSuppliedInput = userSuppliedInput;
+    if (userSuppliedInput) {
+      // Operator-approved creative/targeting travel with the operator URL so the
+      // gateway can forward them to Ads post creation. Never model text.
+      context.userSuppliedInput = {
+        ...userSuppliedInput,
+        ...(goal?.approvedCreative ? { creative: goal.approvedCreative } : {}),
+        ...(goal?.approvedTargeting ? { targeting: goal.approvedTargeting } : {}),
+      };
+    }
   }
 
   private async processBrainOutput(

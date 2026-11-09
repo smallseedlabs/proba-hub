@@ -328,6 +328,18 @@ curl http://localhost:3000/v1/events?after=5 \
 **GET** `/v1/inbox` - Get inbox items  
 **GET** `/v1/goals` - List user's goals  
 
+### Analytics and action bot
+
+Needs the gateway (`GATEWAY_URL`); routes return 503 without it. See [docs/ANALYTICS_ACTIONS.md](docs/ANALYTICS_ACTIONS.md).
+
+**GET/POST** `/v1/analytics/campaigns` - List / register a campaign for review (one provider + account)  
+**PATCH** `/v1/analytics/campaigns/:probaCampaignId` - Rules, review on/off, current daily budget  
+**POST** `/v1/analytics/campaigns/:probaCampaignId/review` - Manual review (coalesced per window)  
+**GET** `/v1/analytics/reviews` - Reports (metrics; unknown stays `"unknown"`)  
+**GET** `/v1/analytics/proposals?status=pending` - Proposed pause / budget-cap actions  
+**POST** `/v1/analytics/proposals/:id/decision` - `{ "decision": "approve" | "reject" }`  
+**GET/PUT** `/v1/goals/:goalId/creative` - Owner-approved Reddit copy/media for post creation  
+
 ### Health Checks
 
 **GET** `/health` - Liveness probe  

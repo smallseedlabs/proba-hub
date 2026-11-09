@@ -13,7 +13,11 @@ import { startOutboxRelay, stopOutboxRelay } from './services/outbox-relay.js';
 import { startAuditRelay, stopAuditRelay } from './audit/relay.js';
 import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
-import { createRuntimeBrain } from './brain/factory.js';
+import { createGatewayRuntime, createRuntimeBrain } from './brain/factory.js';
+import { AnalyticsService } from './analytics/service.js';
+import { startAnalyticsScheduler, stopAnalyticsScheduler } from './analytics/scheduler.js';
+import { analyticsRoutes } from './routes/analytics.js';
+import { getAudit } from './audit/service.js';
 import type { BrainPort } from './types.js';
 import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
 import type { ContextClient } from './brain/context-client.js';
@@ -50,6 +54,11 @@ export interface AppOptions {
   contextClient?: ContextClient;
   /** Override context bridge feature flag (tests). */
   contextBridgeEnabled?: boolean;
+  /**
+   * Analytics and action bot service (tests inject one backed by a FAKE gateway).
+   * Defaults to one built from the gateway config; null when the gateway is disabled.
+   */
+  analytics?: AnalyticsService | null;
 }
 
 /**
@@ -124,6 +133,23 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
   await fastify.register(readRoutes, { prefix: '/v1' });
 
+  let analytics = options.analytics;
+  if (analytics === undefined) {
+    const runtime = await createGatewayRuntime();
+    analytics = runtime
+      ? new AnalyticsService({
+          client: runtime.client,
+          serviceTokens: runtime.serviceTokens,
+          assertions: runtime.assertions,
+          workspaceId: config.audit.workspaceId,
+          tokenTtlSeconds: config.gateway.tokenTtlSeconds,
+          cadenceMs: config.analytics.cadenceMs,
+          audit: getAudit(),
+        })
+      : null;
+  }
+  await fastify.register(analyticsRoutes, { prefix: '/v1', service: analytics, workspaceId: config.audit.workspaceId });
+
   await fastify.register(wellKnownRoutes, {
     prefix: '/v1',
     assertionJwks: assertionAuth.assertionJwks,
@@ -143,10 +169,16 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     // Independent of the SSE relay above and of the proba:events pub/sub channel.
     startAuditRelay();
     startAskExpiryJob();
+    // Scheduled analytics reviews: off by default (ANALYTICS_SCHEDULE_ENABLED). Reviews are
+    // read-only; proposals they create still need an explicit owner approval.
+    if (analytics && config.analytics.scheduleEnabled) {
+      startAnalyticsScheduler(analytics, config.analytics.tickMs);
+    }
     fastify.addHook('onClose', async () => {
       await stopOutboxRelay();
       await stopAuditRelay();
       stopAskExpiryJob();
+      stopAnalyticsScheduler();
     });
   }
 

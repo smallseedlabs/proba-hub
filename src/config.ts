@@ -242,6 +242,19 @@ export const config = {
     tokenTtlSeconds: Math.min(120, Math.max(1, envInt('HUB_GATEWAY_TOKEN_TTL_SECONDS', 120))),
   },
 
+  /**
+   * Analytics and action bot (Hub side). Scheduled evaluator reviews are OFF by
+   * default and only run when the gateway is enabled. There is no setting that
+   * executes proposals automatically: every action needs an explicit owner approve.
+   */
+  analytics: {
+    scheduleEnabled: envBool('ANALYTICS_SCHEDULE_ENABLED', false),
+    /** Review cadence and coalescing window. Default 6h (matches the gateway cooldown default). */
+    cadenceMs: Math.max(60_000, envInt('ANALYTICS_REVIEW_CADENCE_MS', 6 * 60 * 60 * 1000)),
+    /** How often the scheduler checks for due campaigns. */
+    tickMs: Math.max(10_000, envInt('ANALYTICS_SCHEDULER_TICK_MS', 5 * 60 * 1000)),
+  },
+
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */
   audit: {
     /** Master switch: when false no audit event is written to audit_outbox. */
