@@ -12,9 +12,22 @@ import type {
   ControlPayload,
   CreateGoalPayload,
   AnswerAskPayload,
+  AskPayload,
   ContextPacket,
 } from '@smallseedlabs/proba-protocol';
-import { mapBrainOutputToEvent } from '@smallseedlabs/proba-protocol';
+import {
+  RESEARCH_ACCEPT_VERB,
+  buildResearchReviewAskEvent,
+  evaluateResearchReviewAnswer,
+  mapBrainOutputToEvent,
+  validateResearchReviewAsk,
+} from '@smallseedlabs/proba-protocol';
+import { researchReviewFromBrainOutput } from '../brain/research-snapshot.js';
+import {
+  userSuppliedInputFromCommand,
+  userSuppliedInputFromCreateGoal,
+  userSuppliedInputFromUnknown,
+} from '../research/user-input.js';
 import { toJsonb } from '../db/jsonb.js';
 import { getAudit } from '../audit/service.js';
 import { runInSpan, startSpan, type Span } from '../audit/trace.js';
@@ -25,6 +38,8 @@ import {
   runBrainWithBridge,
   type ContextBridgeRuntime,
 } from '../brain/context-attach.js';
+import { controlAbortReason, shouldAttachHubContext } from '../brain/gateway-wiring.js';
+import { applyBoundAskId, askIdFromBrainOutput } from '../brain/gateway-ask-identity.js';
 import {
   lockExecutionState,
   nextExecutionState,
@@ -270,6 +285,7 @@ export class CommandProcessor {
       // These handlers will invoke brain and populate events
     } else {
       const context = await this.buildContext(client, userId, envelope.threadId);
+      this.attachOperatorScope(context, envelope, pendingGoalId);
       
       let brainOutputs: BrainOutput[];
       let brainSpan: Span;
@@ -332,7 +348,8 @@ export class CommandProcessor {
             client,
             userId,
             envelope.threadId,
-            output
+            output,
+            context.userSuppliedInput?.landingPageUrl
           );
           events.push(event);
           await this.addToOutbox(client, userId, event.id);
@@ -374,16 +391,35 @@ export class CommandProcessor {
       const payloadAskType = (envelope.payload as unknown as Record<string, unknown>).askType;
       logger.info({ askId: answerPayload.askId, askType: payloadAskType }, 'Handling answer_ask command');
       // Clients answer with { askId, choice, values }; the brain also needs the
-      // ask type (clarify / plan_approval / action_approval). Look it up.
+      // ask type (clarify / plan_approval / action_approval / research_review). Look it up.
       const brainEnvelope = await this.withAskType(client, envelope);
+      const resolvedAskType = String(
+        (brainEnvelope.payload as unknown as Record<string, unknown>).askType ?? ''
+      );
+
+      if (resolvedAskType === 'research_review') {
+        const review = await this.evaluateStoredResearchReview(
+          client,
+          userId,
+          envelope.threadId!,
+          answerPayload
+        );
+        if (review.blocked) {
+          events.push(review.event);
+          await this.addToOutbox(client, userId, review.event.id);
+          await this.auditAskAnswered(client, scope, answerPayload, resolvedAskType, 'denied');
+          await client.query(
+            'UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2',
+            ['processed', command.id]
+          );
+          await this.auditProcessed(client, scope, startedAt, events, 'denied', review.code);
+          return { command, events };
+        }
+      }
+
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
-      await this.auditAskAnswered(
-        client,
-        scope,
-        answerPayload,
-        (brainEnvelope.payload as unknown as Record<string, unknown>).askType
-      );
+      await this.auditAskAnswered(client, scope, answerPayload, resolvedAskType);
       budgetDeclined = await this.isBudgetDeclined(
         client,
         scope.threadId,
@@ -393,9 +429,7 @@ export class CommandProcessor {
       
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
-      const resolvedAskType = String(
-        (brainEnvelope.payload as unknown as Record<string, unknown>).askType ?? ''
-      );
+      this.attachOperatorScope(context, brainEnvelope);
       const called = await this.callBrain(client, scope, brainEnvelope, context, {
         askType: resolvedAskType,
       });
@@ -421,7 +455,13 @@ export class CommandProcessor {
           continue;
         }
         
-        const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
+        const event = await this.processBrainOutput(
+          client,
+          userId,
+          envelope.threadId!,
+          output,
+          context.userSuppliedInput?.landingPageUrl
+        );
         events.push(event);
         await this.addToOutbox(client, userId, event.id);
         await this.auditBrainOutput(client, scope, brainSpan, output, event);
@@ -443,6 +483,7 @@ export class CommandProcessor {
       
       // After approving plan, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
+      this.attachOperatorScope(context, envelope);
       const called = await this.callBrain(client, scope, envelope, context);
       const brainSpan = called.span;
       const brainOutputs = budgetDeclined
@@ -467,7 +508,13 @@ export class CommandProcessor {
           continue;
         }
         
-        const event = await this.processBrainOutput(client, userId, envelope.threadId!, output);
+        const event = await this.processBrainOutput(
+          client,
+          userId,
+          envelope.threadId!,
+          output,
+          context.userSuppliedInput?.landingPageUrl
+        );
         events.push(event);
         await this.addToOutbox(client, userId, event.id);
         await this.auditBrainOutput(client, scope, brainSpan, output, event);
@@ -527,7 +574,7 @@ export class CommandProcessor {
     let held = false;
 
     try {
-      if (this.bridge?.enabled) {
+      if (shouldAttachHubContext(Boolean(this.bridge?.enabled), this.brain)) {
         const result = await runInSpan(span, () =>
           runBrainWithBridge({
             runtime: this.bridge!,
@@ -776,6 +823,7 @@ export class CommandProcessor {
           );
         }
         if (output.needsApproval) {
+          const researchReview = output.tool === RESEARCH_ACCEPT_VERB;
           await audit.emit(
             {
               action: 'approval.requested',
@@ -784,7 +832,12 @@ export class CommandProcessor {
               parentSpanId: tool.spanId,
               target: askId ? { type: 'ask', id: askId } : undefined,
               riskLevel: output.risk,
-              details: { askType: 'action_approval', blocking: true, tool: output.tool },
+              details: {
+                askType: researchReview ? 'research_review' : 'action_approval',
+                blocking: true,
+                tool: output.tool,
+                ...(researchReview ? { grantsSpend: false } : {}),
+              },
             },
             tx
           );
@@ -917,12 +970,29 @@ export class CommandProcessor {
     client: PoolClient,
     scope: AuditScope,
     payload: AnswerAskPayload,
-    askType: unknown
+    askType: unknown,
+    outcome: 'success' | 'denied' = 'success'
   ): Promise<void> {
     const audit = getAudit();
     const type = typeof askType === 'string' ? askType : 'unknown';
     const target = { type: 'ask', id: String(payload.askId).slice(0, 128) };
     const base = { userId: scope.userId, threadId: scope.threadId, target };
+    if (type === 'research_review') {
+      await audit.emit(
+        {
+          action: payload.choice === 'approve' && outcome === 'success' ? 'approval.granted' : 'approval.rejected',
+          outcome,
+          ...base,
+          details: {
+            askType: type,
+            choice: String(payload.choice).slice(0, 64),
+            grantsSpend: false,
+          },
+        },
+        { tx: client }
+      );
+      return;
+    }
     if (type === 'plan_approval' || type === 'action_approval') {
       const granted = payload.choice === 'approve';
       const decision = await audit.emit(
@@ -1078,25 +1148,59 @@ export class CommandProcessor {
       const goalsResult = await client.query<Goal>(
         `SELECT id, user_id as "userId", thread_id as "threadId", title, description,
                 constraints, budget, status, progress, metrics,
+                user_supplied_input as "userSuppliedInput", input_revision as "inputRevision",
                 created_at as "createdAt", updated_at as "updatedAt"
          FROM goals WHERE thread_id = $1`,
         [threadId]
       );
-      goals = goalsResult.rows;
+      goals = goalsResult.rows.map((row) => ({
+        ...row,
+        userSuppliedInput: userSuppliedInputFromUnknown(row.userSuppliedInput),
+      }));
     }
 
     return { userId, threadId, thread, messages, goals, client };
+  }
+
+  /**
+   * Bind the gateway run to Hub session identity + the operator URL.
+   * workspace/user come from auth; the URL is the persisted/command field, never model text.
+   */
+  private attachOperatorScope(
+    context: BrainContext,
+    envelope: CommandEnvelope,
+    pendingGoalId?: string
+  ): void {
+    if (pendingGoalId) context.pendingGoalId = pendingGoalId;
+    const fromCommand = userSuppliedInputFromCommand(envelope);
+    const fromGoal = context.goals?.[context.goals.length - 1]?.userSuppliedInput;
+    const userSuppliedInput = fromCommand ?? fromGoal;
+    if (userSuppliedInput) context.userSuppliedInput = userSuppliedInput;
   }
 
   private async processBrainOutput(
     client: PoolClient,
     userId: string,
     threadId: string | undefined,
-    output: BrainOutput
+    output: BrainOutput,
+    expectedLandingPageUrl?: string
   ): Promise<Event> {
     const seq = await this.getNextSeq(client, userId);
+
+    if (output.type === 'tool_call' && output.tool === RESEARCH_ACCEPT_VERB) {
+      return this.processResearchReviewOutput(
+        client,
+        userId,
+        threadId,
+        output,
+        seq,
+        expectedLandingPageUrl
+      );
+    }
     
     const eventEnvelope = mapBrainOutputToEvent(output, { seq, threadId });
+    const boundAskId = askIdFromBrainOutput(output);
+    if (boundAskId) applyBoundAskId(eventEnvelope, boundAskId);
     
     let uiPayloadId: string | undefined;
     if ('ui' in eventEnvelope && eventEnvelope.ui) {
@@ -1144,6 +1248,75 @@ export class CommandProcessor {
     return eventResult.rows[0];
   }
 
+  /**
+   * Hub-authored research_review ask. Never mapBrainOutputToEvent / mapToolCallToEvent
+   * for research.accept (those emit a system message, not the review card).
+   */
+  private async processResearchReviewOutput(
+    client: PoolClient,
+    userId: string,
+    threadId: string | undefined,
+    output: BrainOutput,
+    seq: number,
+    expectedLandingPageUrl?: string
+  ): Promise<Event> {
+    const research = researchReviewFromBrainOutput(output);
+    if (!research) {
+      throw new Error(
+        'research.accept snapshot is not a sourced research_review; Context packets are not research and citations were not invented'
+      );
+    }
+    if (expectedLandingPageUrl && research.landingPageUrl !== expectedLandingPageUrl) {
+      throw new Error('research.accept landing URL does not match the operator-entered URL');
+    }
+    const askId = askIdFromBrainOutput(output);
+    if (!askId) {
+      throw new Error('research.accept snapshot is missing a bound askId');
+    }
+
+    const eventEnvelope = buildResearchReviewAskEvent({ askId, research }, { seq, threadId });
+    let uiPayloadId: string | undefined;
+    if (eventEnvelope.ui) {
+      const uiResult = await client.query<{ id: string }>(
+        'INSERT INTO ui_payloads (component, version, props, actions) VALUES ($1, $2, $3, $4) RETURNING id',
+        [
+          eventEnvelope.ui.component,
+          eventEnvelope.ui.version,
+          toJsonb(eventEnvelope.ui.props),
+          toJsonb('actions' in eventEnvelope.ui ? eventEnvelope.ui.actions : null),
+        ]
+      );
+      uiPayloadId = uiResult.rows[0].id;
+    }
+
+    const eventResult = await client.query<Event>(
+      `INSERT INTO events (user_id, seq, type, thread_id, payload, ui_payload_id, fallback_text)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                 payload, ui_payload_id as "uiPayloadId", fallback_text as "fallbackText",
+                 created_at as "createdAt"`,
+      [
+        userId,
+        seq,
+        eventEnvelope.type,
+        threadId,
+        toJsonb(eventEnvelope.payload),
+        uiPayloadId,
+        eventEnvelope.fallbackText ?? null,
+      ]
+    );
+
+    await this.createAsk(client, threadId!, eventEnvelope.payload as unknown as Record<string, unknown>);
+    if (threadId && research.inputRevision) {
+      await client.query(
+        `UPDATE goals SET input_revision = $1
+         WHERE thread_id = $2 AND user_supplied_input->>'landingPageUrl' = $3`,
+        [research.inputRevision, threadId, research.landingPageUrl]
+      );
+    }
+    return eventResult.rows[0];
+  }
+
   private async getNextSeq(client: PoolClient, userId: string): Promise<number> {
     const result = await client.query<{ seq: number }>(
       'SELECT get_next_event_seq($1) as seq',
@@ -1158,8 +1331,8 @@ export class CommandProcessor {
     payload: Record<string, unknown>
   ): Promise<void> {
     await client.query(
-      `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions, research, on_expire)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         payload.askId,
         threadId,
@@ -1170,6 +1343,8 @@ export class CommandProcessor {
         payload.risk,
         toJsonb(payload.costEffect),
         toJsonb(payload.questions),
+        toJsonb(payload.research ?? null),
+        payload.onExpire ?? null,
       ]
     );
 
@@ -1196,6 +1371,86 @@ export class CommandProcessor {
        FROM threads t WHERE t.id = $1`,
       [threadId, payload.title, payload.description, payload.askId]
     );
+  }
+
+  /**
+   * Validate researchAcceptance against the displayed pending artifact.
+   * Mismatch/stale/missing research is not acceptance and is not a spend grant.
+   */
+  private async evaluateStoredResearchReview(
+    client: PoolClient,
+    userId: string,
+    threadId: string,
+    payload: AnswerAskPayload
+  ): Promise<{ blocked: true; event: Event; code: string } | { blocked: false }> {
+    const stored = await client.query<{
+      id: string;
+      askType: string;
+      status: string;
+      title: string;
+      description: string | null;
+      blocking: boolean;
+      risk: string;
+      questions: AskPayload['questions'];
+      research: unknown;
+    }>(
+      `SELECT id, ask_type as "askType", status, title, description, blocking, risk, questions, research
+       FROM asks WHERE id = $1 AND thread_id = $2`,
+      [payload.askId, threadId]
+    );
+    const row = stored.rows[0];
+    if (!row || row.status !== 'pending' || row.askType !== 'research_review') {
+      const event = await this.createErrorEvent(
+        client,
+        userId,
+        threadId,
+        'research_acceptance_mismatch',
+        'No pending research_review ask is bound to this answer; stale or model-supplied ids are not acceptance'
+      );
+      return { blocked: true, event, code: 'research_acceptance_mismatch' };
+    }
+    const parsed = validateResearchReviewAsk(row.research);
+    if (!parsed.success) {
+      const event = await this.createErrorEvent(
+        client,
+        userId,
+        threadId,
+        'research_review_unavailable',
+        'Stored research review is not a sourced artifact; Context packets are not research'
+      );
+      return { blocked: true, event, code: 'research_review_unavailable' };
+    }
+    const ask: AskPayload = {
+      askId: row.id,
+      askType: 'research_review',
+      title: row.title,
+      description: row.description ?? undefined,
+      blocking: row.blocking,
+      risk: row.risk as AskPayload['risk'],
+      questions: row.questions,
+      research: parsed.data,
+    };
+    const result = evaluateResearchReviewAnswer(ask, payload);
+    if (result.outcome === 'mismatch' || result.outcome === 'invalid') {
+      const event = await this.createErrorEvent(client, userId, threadId, 'research_acceptance_mismatch', result.message);
+      return { blocked: true, event, code: 'research_acceptance_mismatch' };
+    }
+    if (result.outcome === 'invalidated') {
+      const next = userSuppliedInputFromUnknown(payload.userSuppliedInput);
+      if (next) {
+        await client.query(
+          `UPDATE goals SET user_supplied_input = $1, input_revision = NULL
+           WHERE thread_id = $2 AND user_id = $3`,
+          [toJsonb(next), threadId, userId]
+        );
+      } else {
+        await client.query(
+          `UPDATE goals SET input_revision = NULL WHERE thread_id = $1 AND user_id = $2`,
+          [threadId, userId]
+        );
+      }
+    }
+    return { blocked: false };
   }
 
   private async handleAskAnswer(
@@ -1246,13 +1501,14 @@ export class CommandProcessor {
     payload: CreateGoalPayload,
     goalId?: string
   ): Promise<GoalRow> {
+    const userSuppliedInput = userSuppliedInputFromCreateGoal(payload);
     const result = await client.query<GoalRow>(
       goalId
-        ? `INSERT INTO goals (id, user_id, thread_id, title, description, constraints, budget, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+        ? `INSERT INTO goals (id, user_id, thread_id, title, description, constraints, budget, status, user_supplied_input)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
            RETURNING id, title, status, progress, metrics, budget`
-        : `INSERT INTO goals (user_id, thread_id, title, description, constraints, budget, status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'active')
+        : `INSERT INTO goals (user_id, thread_id, title, description, constraints, budget, status, user_supplied_input)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
            RETURNING id, title, status, progress, metrics, budget`,
       goalId
         ? [
@@ -1263,6 +1519,7 @@ export class CommandProcessor {
             payload.description,
             toJsonb(payload.constraints),
             toJsonb(payload.budget),
+            toJsonb(userSuppliedInput),
           ]
         : [
             userId,
@@ -1271,8 +1528,25 @@ export class CommandProcessor {
             payload.description,
             toJsonb(payload.constraints),
             toJsonb(payload.budget),
+            toJsonb(userSuppliedInput),
           ]
     );
+    if (userSuppliedInput) {
+      await client.query(
+        `UPDATE goals SET input_revision = a.research->>'inputRevision'
+         FROM asks a
+         WHERE goals.id = $1
+           AND a.thread_id = $2
+           AND a.ask_type = 'research_review'
+           AND a.status = 'pending'
+           AND a.research->>'landingPageUrl' = $3
+           AND a.created_at = (
+             SELECT MAX(created_at) FROM asks
+             WHERE thread_id = $2 AND ask_type = 'research_review' AND status = 'pending'
+           )`,
+        [result.rows[0].id, threadId, userSuppliedInput.landingPageUrl]
+      );
+    }
     return result.rows[0];
   }
 
@@ -1527,6 +1801,18 @@ export class CommandProcessor {
       );
     }
     await this.auditProcessed(client, scope, startedAt, [event], 'success');
+
+    const abortReason = controlAbortReason(payload.action);
+    if (abortReason && this.brain.cancelActive) {
+      try {
+        await this.brain.cancelActive(abortReason, { userId, threadId: envelope.threadId });
+      } catch (error) {
+        logger.warn(
+          { err: error instanceof Error ? error.name : 'error', userId, action: payload.action },
+          'gateway cancel after Hub control failed; Hub execution state already persisted'
+        );
+      }
+    }
 
     return { command, events: [event] };
   }

@@ -23,3 +23,11 @@ describe('createBrain', () => {
     expect(() => createBrain({ provider: 'nope' as never })).toThrow(/Unknown brain provider/);
   });
 });
+
+describe('createRuntimeBrain', () => {
+  it('keeps mock when the gateway is not configured', async () => {
+    const { createRuntimeBrain } = await import('./factory.js');
+    expect(config.gateway.enabled).toBe(false);
+    expect(await createRuntimeBrain()).toBeInstanceOf(MockBrain);
+  });
+});

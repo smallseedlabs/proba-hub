@@ -33,6 +33,15 @@ function envAuditPublisher(): AuditPublisherKind {
 export const BRAIN_PROVIDERS = ['mock', 'deepseek'] as const;
 export type BrainProviderKind = (typeof BRAIN_PROVIDERS)[number];
 
+/** Default: on when GATEWAY_URL is set; explicit GATEWAY_ENABLED wins. */
+function envGatewayEnabled(): boolean {
+  const raw = process.env.GATEWAY_ENABLED?.trim().toLowerCase();
+  if (raw !== undefined && raw !== '') {
+    return !['false', '0', 'no', 'off'].includes(raw);
+  }
+  return (process.env.GATEWAY_URL || '').trim() !== '';
+}
+
 function envBrainProvider(): BrainProviderKind {
   const raw = process.env.BRAIN_PROVIDER?.trim().toLowerCase();
   if (!raw) return 'mock';
@@ -215,6 +224,22 @@ export const config = {
      * stores no brain output for the step. Never falls back to an in-process builder.
      */
     onFailure: envContextBridgeOnFailure(),
+  },
+
+  /**
+   * Gateway orchestration (proba-llm-gateway). When enabled, Hub does not call
+   * DeepSeek or the mock brain and does not build context itself. Unconfigured
+   * stays disabled (existing mock/deepseek). Enabled-but-unreachable is fail-closed,
+   * never a silent fallback to a local model.
+   */
+  gateway: {
+    enabled: envGatewayEnabled(),
+    url: (process.env.GATEWAY_URL || '').trim().replace(/\/+$/, ''),
+    timeoutMs: envInt('GATEWAY_TIMEOUT_MS', 90_000),
+    /** PKCS#8 PEM for Hub→gateway service tokens (iss=proba-hub, aud=proba-gateway, sub=hub). */
+    servicePrivateKeyFile: (process.env.HUB_GATEWAY_PRIVATE_KEY_FILE || '').trim(),
+    serviceKeyId: (process.env.HUB_GATEWAY_KEY_ID || 'hub-gw-1').trim(),
+    tokenTtlSeconds: Math.min(120, Math.max(1, envInt('HUB_GATEWAY_TOKEN_TTL_SECONDS', 120))),
   },
 
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */

@@ -71,7 +71,7 @@ describe('API Integration Tests', () => {
 
   describe('POST /v1/commands', () => {
     it('should return 202 Accepted for valid command', async () => {
-      const clientMsgId = '11111111-1111-1111-1111-111111111111';
+      const clientMsgId = '11111111-1111-4111-8111-111111111111';
 
       const response = await app.inject({
         method: 'POST',
@@ -98,7 +98,7 @@ describe('API Integration Tests', () => {
     });
 
     it('should be idempotent on (userId, clientMsgId)', async () => {
-      const clientMsgId = '22222222-2222-2222-2222-222222222222';
+      const clientMsgId = '22222222-2222-4222-8222-222222222222';
       const command = {
         kind: 'command',
         clientMsgId,

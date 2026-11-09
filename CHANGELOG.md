@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Research review forwarding (Hub slice, not the full product): persist operator
+  `create_goal.userSuppliedInput.landingPageUrl` (no default URL), copy it onto
+  gateway `POST /v1/runs` with session workspace/user + goal/thread, map gateway
+  `research.accept` snapshots to protocol `askType: research_review` (findings /
+  sources / assumptions / unknowns from the artifact, not Context), and resume
+  with `researchAcceptance` bound to the displayed artifact/version/revision.
+  `edit` invalidates and starts a new gather (new input revision); acceptance
+  never grants spend. Missing/unconfigured gateway still fails closed. Protocol
+  pin is SHA `298eeb4b4ba3fe14b4bf5077810ce2f433067984` (0.6.0; there is no
+  `v0.6.0` tag) with `zod@^4.6.7`. Command envelopes now require RFC 4122
+  UUIDs (`z.uuid()`). See `docs/RESEARCH_REVIEW.md`.
+- Hub→gateway orchestration (opt-in, default off): when `GATEWAY_URL` is enabled, Hub posts
+  tenant-scoped runs to `proba-llm-gateway` instead of mock/DeepSeek. Durable `gateway_runs`
+  rows bind original command + idempotencyKey + askId across restart, scoped to
+  workspace/user/goal/thread/run. Pause/kill cancel every cancellable run for that workspace
+  user. Unconfigured or failed gateway is fail-closed (no silent model fallback). See `.env.example`.
 - Context bridge support (brief 05): EdDSA act-as assertion minting (`HUB_ASSERTION_PRIVATE_KEY_FILE`),
   public JWKS at `GET /v1/.well-known/assertion-keys`, `context-reader` internal reads
   (`GET /v1/internal/goals/{goalId}/state`, `GET /v1/internal/threads/{threadId}/messages`,

@@ -51,6 +51,9 @@ describe('Hub event → stepType mapping', () => {
     expect(
       mapCommandToStepType(command('answer_ask', { askType: 'plan_approval' }), { askType: 'plan_approval' })
     ).toBe('handle_approval');
+    expect(
+      mapCommandToStepType(command('answer_ask', { askType: 'research_review' }), { askType: 'research_review' })
+    ).toBe('interpret_message');
     expect(mapCommandToStepType(command('explain', { target: 'budget' }))).toBe('explain_decision');
     expect(mapCommandToStepType(command('control', { action: 'pause' }))).toBe('interpret_message');
     expect(mapCommandToStepType(command('mark_read', {}))).toBe('interpret_message');
