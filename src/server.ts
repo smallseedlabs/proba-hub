@@ -42,7 +42,7 @@ declare module 'fastify' {
  */
 export async function createServer(): Promise<FastifyInstance> {
   const fastify: FastifyInstance = Fastify({
-    logger: logger as FastifyBaseLogger,
+    loggerInstance: logger as FastifyBaseLogger,
     requestIdLogLabel: 'reqId',
     // Fastify's own request lines are logged before any hook runs, so they could not
     // carry the traceId. The onResponse hook below logs one line per request instead.
