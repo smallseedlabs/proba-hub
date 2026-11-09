@@ -31,13 +31,16 @@ export function createBrain(options: CreateBrainOptions = {}): BrainPort {
   }
 }
 
-/**
- * Runtime brain: gateway when GATEWAY_URL is enabled, otherwise mock/deepseek.
- * Gateway excludes DeepSeek/mock so there is no double model dispatch.
- */
-export async function createRuntimeBrain(options: CreateBrainOptions = {}): Promise<BrainPort> {
+export interface GatewayRuntime {
+  client: ReturnType<typeof createGatewayClient>;
+  serviceTokens: ReturnType<typeof createGatewayTokenMinter>;
+  assertions: ReturnType<typeof createAssertionMinter> | null;
+}
+
+/** Gateway client + Hub service-token and act-as minters. Null when the gateway is disabled. */
+export async function createGatewayRuntime(): Promise<GatewayRuntime | null> {
   assertGatewayGuards();
-  if (!config.gateway.enabled) return createBrain(options);
+  if (!config.gateway.enabled) return null;
   if (!config.gateway.servicePrivateKeyFile) {
     throw new Error('HUB_GATEWAY_PRIVATE_KEY_FILE is required when GATEWAY_URL is enabled');
   }
@@ -55,10 +58,24 @@ export async function createRuntimeBrain(options: CreateBrainOptions = {}): Prom
     });
     assertions = createAssertionMinter({ signingKey: assertionKey });
   }
-  return new GatewayBrain({
+  return {
     client: createGatewayClient({ baseUrl: config.gateway.url, timeoutMs: config.gateway.timeoutMs }),
     serviceTokens: createGatewayTokenMinter({ signingKey }),
     assertions,
+  };
+}
+
+/**
+ * Runtime brain: gateway when GATEWAY_URL is enabled, otherwise mock/deepseek.
+ * Gateway excludes DeepSeek/mock so there is no double model dispatch.
+ */
+export async function createRuntimeBrain(options: CreateBrainOptions = {}): Promise<BrainPort> {
+  const runtime = await createGatewayRuntime();
+  if (!runtime) return createBrain(options);
+  return new GatewayBrain({
+    client: runtime.client,
+    serviceTokens: runtime.serviceTokens,
+    assertions: runtime.assertions,
     workspaceId: config.audit.workspaceId,
     tokenTtlSeconds: config.gateway.tokenTtlSeconds,
     store: new PostgresGatewayRunStore(),

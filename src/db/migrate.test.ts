@@ -14,5 +14,6 @@ describe('migration list', () => {
     expect(migrations.find((m) => m.name === 'execution_state')?.file).toBe('005_execution_state.sql');
     expect(migrations.find((m) => m.name === 'gateway_runs')?.file).toBe('006_gateway_runs.sql');
     expect(migrations.find((m) => m.name === 'research_review')?.file).toBe('007_research_review.sql');
+    expect(migrations.find((m) => m.name === 'analytics_actions')?.file).toBe('008_analytics_actions.sql');
   });
 });

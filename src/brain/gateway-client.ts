@@ -10,6 +10,10 @@ export type GatewayRunStatus =
   | 'ambiguous'
   | 'blocked';
 
+export type ApprovedCreative =
+  | { type: 'TEXT'; headline: string; body: string }
+  | { type: 'IMAGE'; headline: string; body?: string; mediaUrl: string; callToAction?: string };
+
 export interface GatewayRunSnapshot {
   runId: string;
   status: GatewayRunStatus;
@@ -18,6 +22,10 @@ export interface GatewayRunSnapshot {
   needs?: unknown[];
   usage?: unknown;
   error?: { code: string; message: string; retryable?: boolean };
+  /** review_performance summary (dry-run proposal is evidence only). */
+  analytics?: Record<string, unknown>;
+  /** Outcome of a Hub-approved analytics action. */
+  actionOutcome?: Record<string, unknown>;
 }
 
 export interface GatewayRunRequest {
@@ -36,7 +44,13 @@ export interface GatewayRunRequest {
    * Operator-entered landing URL from Hub session/goal persistence.
    * Never taken from model/tool text. Omitted is valid; gather/create fail closed.
    */
-  userSuppliedInput?: { landingPageUrl: string };
+  userSuppliedInput?: {
+    landingPageUrl: string;
+    /** Operator-approved creative (copy/media) for Ads post creation. */
+    creative?: ApprovedCreative;
+    /** Operator-approved targeting (Ads validates the Reddit shape). */
+    targeting?: Record<string, unknown>;
+  };
   resume?: {
     askId: string;
     choice: 'approve' | 'reject' | 'edit';

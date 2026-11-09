@@ -1,3 +1,4 @@
+import type { ApprovedCreative } from './brain/gateway-client.js';
 import type { PoolClient } from 'pg';
 import type {
   CommandEnvelope,
@@ -105,6 +106,9 @@ export interface Goal {
   metrics?: Record<string, unknown>;
   /** Original operator userSuppliedInput; never a model-invented URL. */
   userSuppliedInput?: { landingPageUrl: string };
+  /** Operator-approved creative/targeting (PUT /v1/goals/:id/creative); forwarded for Ads post creation. */
+  approvedCreative?: ApprovedCreative;
+  approvedTargeting?: Record<string, unknown>;
   /** Opaque gateway inputRevision for the current operator URL. */
   inputRevision?: string;
   createdAt: Date;
@@ -190,7 +194,11 @@ export interface BrainContext {
    * Operator-entered landing URL from the command or persisted goal.
    * Auth workspace/user come from the session, not from this object.
    */
-  userSuppliedInput?: { landingPageUrl: string };
+  userSuppliedInput?: {
+    landingPageUrl: string;
+    creative?: ApprovedCreative;
+    targeting?: Record<string, unknown>;
+  };
 }
 
 /** Normalize a brain.process return value to a BrainStepResult. */
