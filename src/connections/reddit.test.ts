@@ -56,4 +56,31 @@ describe('Reddit connection adapter (FAKE Reddit OAuth server)', () => {
     const offline = new RedditConnectionAdapter({ clientId: 'c', clientSecret: 's', oauthBaseUrl: 'http://127.0.0.1:9', timeoutMs: 500 });
     await expect(offline.refresh('r')).rejects.toMatchObject({ code: 'provider_unavailable' });
   });
+
+  it('skips a business without ad account permission and still lists the readable ones', async () => {
+    fake.forbiddenBusiness = true;
+    try {
+      const tokens = await adapter.exchangeCode({ code: fake.issueCode(), redirectUri: 'http://localhost:5180/marketing/reddit/callback' });
+      const accounts = await adapter.listAccounts(tokens.accessToken);
+      expect(accounts.map((a) => a.id)).toEqual(['a2_one', 'a2_two']);
+    } finally {
+      fake.forbiddenBusiness = false;
+    }
+  });
+
+  it('reports a refused Ads API with status, path and Reddit error code, never the token', async () => {
+    const tokens = await adapter.exchangeCode({ code: fake.issueCode(), redirectUri: 'http://localhost:5180/marketing/reddit/callback' });
+    fake.adsApiRefusal = { status: 403, code: 'FORBIDDEN', message: `app has no Ads API access (token ${tokens.accessToken})` };
+    try {
+      const err = await adapter.listAccounts(tokens.accessToken).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ProviderOAuthError);
+      const e = err as ProviderOAuthError;
+      expect(e.code).toBe('provider_refused');
+      expect(e.detail).toMatchObject({ step: 'list_accounts', status: 403, path: '/me/businesses', providerCode: 'FORBIDDEN' });
+      expect(JSON.stringify(e.detail)).not.toContain(tokens.accessToken);
+      expect(e.message).not.toContain(tokens.accessToken);
+    } finally {
+      fake.adsApiRefusal = null;
+    }
+  });
 });

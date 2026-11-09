@@ -1,5 +1,6 @@
 import {
   ProviderOAuthError,
+  providerErrorFields,
   type ConnectionProviderAdapter,
   type OAuthTokenSet,
   type ProviderAccount,
@@ -80,17 +81,33 @@ export class RedditConnectionAdapter implements ConnectionProviderAdapter {
       body: new URLSearchParams({ token: refreshToken, token_type_hint: 'refresh_token' }).toString(),
     });
     if (response.status >= 400) {
-      throw new ProviderOAuthError(response.status >= 500 ? 'provider_unavailable' : 'provider_refused', `Reddit revoke answered ${response.status}`, response.status);
+      throw new ProviderOAuthError(response.status >= 500 ? 'provider_unavailable' : 'provider_refused', `Reddit revoke answered ${response.status}`, response.status, {
+        step: 'revoke',
+        status: response.status,
+        path: '/api/v1/revoke_token',
+      });
     }
   }
 
   async listAccounts(accessToken: string): Promise<ProviderAccount[]> {
     const businesses = await this.apiGet(accessToken, '/me/businesses');
     const accounts: ProviderAccount[] = [];
+    let firstRefusal: ProviderOAuthError | undefined;
     for (const business of asArray(businesses).slice(0, MAX_BUSINESSES)) {
       const businessId = str(business.id);
       if (!businessId) continue;
-      const listed = await this.apiGet(accessToken, `/businesses/${encodeURIComponent(businessId)}/ad_accounts`);
+      let listed: unknown;
+      try {
+        listed = await this.apiGet(accessToken, `/businesses/${encodeURIComponent(businessId)}/ad_accounts`);
+      } catch (err) {
+        // A member can belong to a business without ad account permission there: skip that business,
+        // fail only if no business yields an account.
+        if (err instanceof ProviderOAuthError && err.code === 'provider_refused') {
+          firstRefusal ??= err;
+          continue;
+        }
+        throw err;
+      }
       for (const account of asArray(listed)) {
         const id = str(account.id);
         if (!id || accounts.some((a) => a.id === id)) continue;
@@ -104,6 +121,7 @@ export class RedditConnectionAdapter implements ConnectionProviderAdapter {
         if (accounts.length >= MAX_ACCOUNTS) return accounts;
       }
     }
+    if (accounts.length === 0 && firstRefusal) throw firstRefusal;
     return accounts;
   }
 
@@ -125,10 +143,16 @@ export class RedditConnectionAdapter implements ConnectionProviderAdapter {
     });
     const body = await readJson(response);
     const error = str(body?.error);
-    if (response.status >= 500) throw new ProviderOAuthError('provider_unavailable', `Reddit token endpoint answered ${response.status}`, response.status);
-    if (error === 'invalid_grant') throw new ProviderOAuthError('invalid_grant', 'Reddit refused the grant (expired, used or revoked)', response.status);
+    const detail = {
+      step: form.grant_type === 'refresh_token' ? ('token_refresh' as const) : ('token_exchange' as const),
+      status: response.status,
+      path: '/api/v1/access_token',
+      ...providerErrorFields(body),
+    };
+    if (response.status >= 500) throw new ProviderOAuthError('provider_unavailable', `Reddit token endpoint answered ${response.status}`, response.status, detail);
+    if (error === 'invalid_grant') throw new ProviderOAuthError('invalid_grant', 'Reddit refused the grant (expired, used or revoked)', response.status, detail);
     if (response.status >= 400 || error) {
-      throw new ProviderOAuthError('provider_refused', `Reddit token endpoint refused the request (${error ?? response.status})`, response.status);
+      throw new ProviderOAuthError('provider_refused', `Reddit token endpoint refused the request (${error ?? response.status})`, response.status, detail);
     }
     const accessToken = str(body?.access_token);
     const expiresIn = Number(body?.expires_in);
@@ -150,13 +174,18 @@ export class RedditConnectionAdapter implements ConnectionProviderAdapter {
       method: 'GET',
       headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json', 'user-agent': USER_AGENT },
     });
-    if (response.status === 401 || response.status === 403) {
-      throw new ProviderOAuthError('provider_refused', `Reddit Ads API refused ${path} (${response.status}); check the granted scopes`, response.status);
-    }
-    if (response.status >= 400) {
-      throw new ProviderOAuthError(response.status >= 500 ? 'provider_unavailable' : 'provider_refused', `Reddit Ads API answered ${response.status} for ${path}`, response.status);
-    }
     const body = await readJson(response);
+    if (response.status >= 400) {
+      const route = path.replace(/\/businesses\/[^/]+\//, '/businesses/{id}/');
+      const detail = { step: 'list_accounts' as const, status: response.status, path: route, ...providerErrorFields(body, [accessToken]) };
+      const refused = response.status < 500 && response.status !== 429;
+      throw new ProviderOAuthError(
+        refused ? 'provider_refused' : 'provider_unavailable',
+        `Reddit Ads API answered ${response.status} for ${route}${detail.providerCode ? ` (${detail.providerCode})` : ''}`,
+        response.status,
+        detail
+      );
+    }
     return body && 'data' in body ? body.data : body;
   }
 

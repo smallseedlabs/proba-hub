@@ -127,6 +127,28 @@ describe('platform connections broker (FAKE Reddit OAuth, real Postgres)', () =>
     expect(reused.json().error).toBe('invalid_state');
   });
 
+  it('a refused Ads API account listing explains the status, revokes the grant and audits safe details only', async () => {
+    fake.adsApiRefusal = { status: 403, code: 'FORBIDDEN', message: 'This app is not authorized for the Ads API' };
+    const revokedBefore = fake.revoked.length;
+    try {
+      const res = await connect(owner);
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error).toBe('accounts_unavailable');
+      expect(res.json().message).toContain('HTTP 403, /me/businesses, FORBIDDEN');
+    } finally {
+      fake.adsApiRefusal = null;
+    }
+    expect(fake.revoked.length).toBe(revokedBefore + 1);
+    expect((await inject(owner, 'GET', '/v1/connections')).json().connections[0].status).toBe('not_connected');
+    const audit = await pool.query<{ payload: string }>(
+      `SELECT payload::text AS payload FROM audit_outbox WHERE payload::text LIKE '%list_accounts%' ORDER BY id DESC LIMIT 1`
+    );
+    const text = audit.rows[0]?.payload ?? '';
+    expect(text).toContain('"status": 403');
+    expect(text).toContain('FORBIDDEN');
+    for (const t of [...fake.refreshTokens, ...fake.accessTokens, ...fake.codes]) expect(text).not.toContain(t);
+  });
+
   it('connects, stores only ciphertext, needs an account pick, then brokers cached short-lived tokens', async () => {
     const res = await connect(owner);
     expect(res.statusCode).toBe(200);
@@ -196,6 +218,8 @@ describe('platform connections broker (FAKE Reddit OAuth, real Postgres)', () =>
     );
     const text = audit.rows.map((r) => r.payload).join('\n');
     expect(text).toContain('token_refresh_failed');
+    expect(text).toContain('"step": "token_refresh"');
+    expect(text).toContain('"status": 400');
     expect(text).toContain('account_selected');
     for (const t of [...fake.refreshTokens, ...fake.accessTokens]) expect(text).not.toContain(t);
   });

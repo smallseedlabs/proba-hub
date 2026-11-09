@@ -43,15 +43,49 @@ export type ProviderOAuthErrorCode =
   | 'provider_unavailable'
   | 'bad_response';
 
+/**
+ * Safe diagnostics for a provider refusal: HTTP status, the provider's own error code and a
+ * short message, and the API path (no query). Never tokens, codes or response bodies.
+ */
+export interface ProviderErrorDetail {
+  step: 'connect_start' | 'token_exchange' | 'token_refresh' | 'revoke' | 'list_accounts';
+  status?: number;
+  path?: string;
+  providerCode?: string;
+  providerMessage?: string;
+}
+
 export class ProviderOAuthError extends Error {
   constructor(
     readonly code: ProviderOAuthErrorCode,
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly detail?: ProviderErrorDetail
   ) {
     super(message);
     this.name = 'ProviderOAuthError';
   }
+}
+
+const SAFE_CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const SECRETISH = /(bearer\s+\S+|eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{20,})/gi;
+
+function maskKnown(text: string, secrets: string[]): string {
+  return secrets.filter((x) => x.length >= 6).reduce((t, x) => t.split(x).join('[masked]'), text);
+}
+
+/** Pull a provider error code/message out of a JSON error body, bounded and with token-like strings masked. */
+export function providerErrorFields(body: unknown, secrets: string[] = []): { providerCode?: string; providerMessage?: string } {
+  if (!body || typeof body !== 'object') return {};
+  const root = body as Record<string, unknown>;
+  const nested = root.error && typeof root.error === 'object' ? (root.error as Record<string, unknown>) : undefined;
+  const pick = (...values: unknown[]) => values.find((v): v is string => typeof v === 'string' && v.trim() !== '');
+  const code = pick(nested?.code, nested?.type, typeof root.error === 'string' ? root.error : undefined, root.code, root.reason);
+  const message = pick(nested?.message, root.message, root.error_description, root.explanation);
+  return {
+    ...(code && SAFE_CODE.test(code) ? { providerCode: code } : {}),
+    ...(message ? { providerMessage: maskKnown(message, secrets).replace(SECRETISH, '[masked]').slice(0, 200) } : {}),
+  };
 }
 
 export interface ConnectionProviderAdapter {
