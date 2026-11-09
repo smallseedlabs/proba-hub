@@ -140,6 +140,10 @@ function redactSnapshotMessage(value: string): string {
   return looksSecret(redacted) ? 'gateway error' : redacted;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function parseSnapshot(body: unknown): GatewayRunSnapshot {
   if (!body || typeof body !== 'object') {
     throw new GatewayClientError('invalid_response', 'gateway returned a non-object body');
@@ -155,6 +159,8 @@ function parseSnapshot(body: unknown): GatewayRunSnapshot {
     ...(Array.isArray(row.outputs) ? { outputs: row.outputs } : {}),
     ...(Array.isArray(row.needs) ? { needs: row.needs } : {}),
     ...(row.usage !== undefined ? { usage: row.usage } : {}),
+    ...(isPlainObject(row.analytics) ? { analytics: row.analytics } : {}),
+    ...(isPlainObject(row.actionOutcome) ? { actionOutcome: row.actionOutcome } : {}),
     ...(row.error && typeof row.error === 'object'
       ? {
           error: {
