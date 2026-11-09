@@ -17,6 +17,8 @@ import { createGatewayRuntime, createRuntimeBrain } from './brain/factory.js';
 import { AnalyticsService } from './analytics/service.js';
 import { startAnalyticsScheduler, stopAnalyticsScheduler } from './analytics/scheduler.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { brokerRoutes, connectionRoutes } from './routes/connections.js';
+import { createConnectionsRuntime, type ConnectionsRuntime } from './connections/runtime.js';
 import { getAudit } from './audit/service.js';
 import type { BrainPort } from './types.js';
 import { createAssertionRuntime, type ContextBridgeHubAuth } from './auth/assertions/index.js';
@@ -59,6 +61,8 @@ export interface AppOptions {
    * Defaults to one built from the gateway config; null when the gateway is disabled.
    */
   analytics?: AnalyticsService | null;
+  /** Platform connections broker; undefined builds it from config, null turns it off. */
+  connections?: ConnectionsRuntime | null;
 }
 
 /**
@@ -149,6 +153,16 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       : null;
   }
   await fastify.register(analyticsRoutes, { prefix: '/v1', service: analytics, workspaceId: config.audit.workspaceId });
+
+  const connections = options.connections !== undefined ? options.connections : await createConnectionsRuntime();
+  await fastify.register(connectionRoutes, { prefix: '/v1', service: connections?.service ?? null });
+  if (connections?.adsVerifier) {
+    await fastify.register(brokerRoutes, {
+      prefix: '/v1/internal',
+      service: connections.service,
+      verifier: connections.adsVerifier,
+    });
+  }
 
   await fastify.register(wellKnownRoutes, {
     prefix: '/v1',
