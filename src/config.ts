@@ -255,6 +255,26 @@ export const config = {
     tickMs: Math.max(10_000, envInt('ANALYTICS_SCHEDULER_TICK_MS', 5 * 60 * 1000)),
   },
 
+  /**
+   * Platform connections (credential broker for ad providers). Off unless
+   * HUB_CONNECTIONS_KEY_FILE is set. App credentials are FILES (never inline values); the
+   * redirect URI must match the provider app exactly. Ads gets short-lived access tokens
+   * from POST /v1/internal/connections/:provider/access-token with a service token
+   * verified against HUB_ADS_SERVICE_PUBLIC_KEY_FILE.
+   */
+  connections: {
+    keyFile: (process.env.HUB_CONNECTIONS_KEY_FILE || '').trim(),
+    adsServicePublicKeyFile: (process.env.HUB_ADS_SERVICE_PUBLIC_KEY_FILE || '').trim(),
+    stateTtlSeconds: Math.min(1800, Math.max(60, envInt('HUB_CONNECTIONS_STATE_TTL_SECONDS', 600))),
+    reddit: {
+      clientIdFile: (process.env.HUB_REDDIT_CLIENT_ID_FILE || '').trim(),
+      clientSecretFile: (process.env.HUB_REDDIT_CLIENT_SECRET_FILE || '').trim(),
+      redirectUri: (process.env.HUB_REDDIT_REDIRECT_URI || '').trim(),
+      oauthBaseUrl: (process.env.HUB_REDDIT_OAUTH_BASE_URL || 'https://www.reddit.com').trim(),
+      adsApiBaseUrl: (process.env.HUB_REDDIT_ADS_API_BASE_URL || 'https://ads-api.reddit.com/api/v3').trim(),
+    },
+  },
+
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */
   audit: {
     /** Master switch: when false no audit event is written to audit_outbox. */
