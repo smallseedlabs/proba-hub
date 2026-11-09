@@ -10,6 +10,7 @@ import {
   type ConnectionProviderAdapter,
   type ConnectionProviderId,
   type ProviderAccount,
+  type ProviderErrorDetail,
 } from './provider.js';
 
 /**
@@ -174,9 +175,18 @@ export class ConnectionsService {
 
   /** Begin OAuth: a fresh single-use state bound to this user, workspace and provider. */
   async start(userId: string, provider: ConnectionProviderId): Promise<{ authorizeUrl: string; expiresAt: string }> {
-    const adapter = this.adapter(provider);
+    let adapter: ConnectionProviderAdapter;
+    try {
+      adapter = this.adapter(provider);
+    } catch (err) {
+      await this.auditConnect(userId, provider, undefined, 'failure', 'provider_unavailable', {
+        provider_error: { step: 'connect_start', providerMessage: 'provider not configured on this Hub' },
+      });
+      throw err;
+    }
     const existing = await this.load(provider);
     if (existing && existing.connected_by !== userId) {
+      await this.auditConnect(userId, provider, existing.id, 'denied', 'connected_by_other', { provider_error: { step: 'connect_start' } });
       throw new ConnectionError('connected_by_other', 'Another member connected this provider; they must disconnect it first', 409);
     }
     const redirectUri = this.options.redirectUris[provider]!;
@@ -222,22 +232,30 @@ export class ConnectionsService {
       tokens = await adapter.exchangeCode({ code: input.code, redirectUri: stateRow.redirect_uri });
     } catch (err) {
       const code = err instanceof ProviderOAuthError ? err.code : 'provider_unavailable';
-      await this.auditConnect(userId, provider, undefined, 'failure', code);
-      throw new ConnectionError(code, 'The provider did not accept the sign-in. Start again.', 502);
+      const detail = providerDetail(err, 'token_exchange');
+      logger.warn({ provider, errorCode: code, ...detail }, 'platform connection: code exchange failed');
+      await this.auditConnect(userId, provider, undefined, 'failure', code, { provider_error: detail });
+      throw new ConnectionError(code, `The provider did not accept the sign-in${describeDetail(detail)}. Start again.`, 502);
     }
     const missing = adapter.scopes.filter((s) => tokens.scopes.length > 0 && !tokens.scopes.includes(s));
     if (missing.length > 0) {
-      await adapter.revoke(tokens.refreshToken!).catch(() => undefined);
+      await this.revokeUnstored(adapter, tokens.refreshToken!, userId, provider);
       await this.auditConnect(userId, provider, undefined, 'denied', 'scope_missing', { missingScopes: missing });
       throw new ConnectionError('scope_missing', `The grant is missing required scopes: ${missing.join(', ')}`, 400);
     }
     try {
       accounts = await adapter.listAccounts(tokens.accessToken);
     } catch (err) {
-      await adapter.revoke(tokens.refreshToken!).catch(() => undefined);
+      await this.revokeUnstored(adapter, tokens.refreshToken!, userId, provider);
       const code = err instanceof ProviderOAuthError ? err.code : 'provider_unavailable';
-      await this.auditConnect(userId, provider, undefined, 'failure', code);
-      throw new ConnectionError('accounts_unavailable', 'Could not list your ad accounts on the provider. Start again.', 502);
+      const detail = providerDetail(err, 'list_accounts');
+      logger.warn({ provider, errorCode: code, grantedScopes: tokens.scopes, ...detail }, 'platform connection: listing ad accounts failed');
+      await this.auditConnect(userId, provider, undefined, 'failure', code, { provider_error: detail });
+      const hint =
+        detail.status === 401 || detail.status === 403
+          ? ' The sign-in worked, but the provider refused access to its Ads API for this app or login.'
+          : '';
+      throw new ConnectionError('accounts_unavailable', `Could not list your ad accounts on the provider${describeDetail(detail)}.${hint} Start again.`, 502);
     }
 
     const connectionId = randomUUID();
@@ -278,7 +296,7 @@ export class ConnectionsService {
       );
       return old;
     }).catch(async (err) => {
-      await adapter.revoke(tokens.refreshToken!).catch(() => undefined);
+      await this.revokeUnstored(adapter, tokens.refreshToken!, userId, provider);
       throw err;
     });
     if (previous) {
@@ -417,11 +435,13 @@ export class ConnectionsService {
       tokens = await adapter.refresh(refreshToken);
     } catch (err) {
       const code = err instanceof ProviderOAuthError ? err.code : 'provider_unavailable';
+      const detail = providerDetail(err, 'token_refresh');
+      logger.warn({ provider: row.provider, connectionId: row.id, errorCode: code, ...detail }, 'platform connection: token refresh failed');
       if (code === 'invalid_grant' || code === 'access_denied') {
-        await this.markNeedsReconnect(row, code, input);
+        await this.markNeedsReconnect(row, code, input, detail);
         throw new ConnectionError('needs_reconnect', 'The provider refused the stored grant; reconnect it in Marketing', 409);
       }
-      await this.auditRefreshFailure(row, code, input);
+      await this.auditRefreshFailure(row, code, input, detail);
       throw new ConnectionError('provider_unavailable', 'The provider is unavailable; try again later', 503);
     }
     const expiresAt = this.now().getTime() + tokens.expiresInSeconds * 1000;
@@ -441,16 +461,16 @@ export class ConnectionsService {
     return entry;
   }
 
-  private async markNeedsReconnect(row: ConnectionRow, code: string, input: IssueAccessTokenInput) {
+  private async markNeedsReconnect(row: ConnectionRow, code: string, input: IssueAccessTokenInput, detail?: ProviderErrorDetail) {
     await pool.query(
       `UPDATE platform_connections SET status = 'needs_reconnect', last_error_code = $2, updated_at = $3 WHERE id = $1`,
       [row.id, code, this.now()]
     );
     this.cache.delete(row.id);
-    await this.auditRefreshFailure(row, code, input);
+    await this.auditRefreshFailure(row, code, input, detail);
   }
 
-  private async auditRefreshFailure(row: ConnectionRow, code: string, input: IssueAccessTokenInput) {
+  private async auditRefreshFailure(row: ConnectionRow, code: string, input: IssueAccessTokenInput, detail?: ProviderErrorDetail) {
     await this.options.audit.emit(
       {
         action: 'system.job_failed',
@@ -471,10 +491,34 @@ export class ConnectionsService {
           purpose: input.purpose,
           initiatedBy: input.initiatedBy ?? 'system',
           ...(input.traceId ? { callerTraceId: input.traceId } : {}),
+          ...(detail ? { provider_error: detail } : {}),
         },
       },
       { bestEffort: true }
     );
+  }
+
+  /** Revoke a grant that was never stored (refused scopes, listing failure, lost race); failures are audited. */
+  private async revokeUnstored(adapter: ConnectionProviderAdapter, refreshToken: string, userId: string, provider: ConnectionProviderId) {
+    try {
+      await adapter.revoke(refreshToken);
+    } catch (err) {
+      const detail = providerDetail(err, 'revoke');
+      const code = err instanceof ProviderOAuthError ? err.code : 'provider_unavailable';
+      logger.warn({ provider, errorCode: code, ...detail }, 'provider revoke of an unstored grant failed');
+      await this.options.audit.emit(
+        {
+          action: 'system.job_failed',
+          outcome: 'failure',
+          actor: { type: 'service', id: 'connection-broker' },
+          userId,
+          workspaceId: this.options.workspaceId,
+          errorCode: 'token_revoke_failed',
+          details: { kind: 'platform_connection', event: 'token_revoke_failed', job: 'provider_token_revoke', provider, reason: code, provider_error: detail },
+        },
+        { bestEffort: true }
+      );
+    }
   }
 
   private async revokeRow(adapter: ConnectionProviderAdapter, row: ConnectionRow): Promise<boolean> {
@@ -483,9 +527,29 @@ export class ConnectionsService {
       await adapter.revoke(refreshToken);
       return true;
     } catch (err) {
-      logger.warn(
-        { provider: row.provider, connectionId: row.id, error: err instanceof ProviderOAuthError ? err.code : 'error' },
-        'provider revoke failed; the stored grant is deleted anyway'
+      const detail = providerDetail(err, 'revoke');
+      const code = err instanceof ProviderOAuthError ? err.code : 'provider_unavailable';
+      logger.warn({ provider: row.provider, connectionId: row.id, errorCode: code, ...detail }, 'provider revoke failed; the stored grant is deleted anyway');
+      await this.options.audit.emit(
+        {
+          action: 'system.job_failed',
+          outcome: 'failure',
+          actor: { type: 'service', id: 'connection-broker' },
+          userId: row.connected_by,
+          workspaceId: row.workspace_id,
+          target: { type: 'platform_connection', id: row.id },
+          errorCode: 'token_revoke_failed',
+          details: {
+            kind: 'platform_connection',
+            event: 'token_revoke_failed',
+            job: 'provider_token_revoke',
+            provider: row.provider,
+            connectionId: row.id,
+            reason: code,
+            provider_error: detail,
+          },
+        },
+        { bestEffort: true }
       );
       return false;
     }
@@ -512,4 +576,17 @@ export class ConnectionsService {
       { bestEffort: true }
     );
   }
+}
+
+/** Safe fields of a provider failure for logs and audit (status, provider error code/message, API path). */
+function providerDetail(err: unknown, step: ProviderErrorDetail['step']): ProviderErrorDetail {
+  if (err instanceof ProviderOAuthError) {
+    return err.detail ?? { step, ...(err.status ? { status: err.status } : {}), providerMessage: err.message.slice(0, 200) };
+  }
+  return { step, providerMessage: 'unreachable or unexpected error' };
+}
+
+function describeDetail(detail: ProviderErrorDetail): string {
+  const parts = [detail.status ? `HTTP ${detail.status}` : '', detail.path ?? '', detail.providerCode ?? ''].filter(Boolean);
+  return parts.length ? ` (${parts.join(', ')})` : '';
 }

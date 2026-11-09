@@ -26,6 +26,10 @@ export class FakeRedditOAuthServer {
   calls: Array<{ path: string; grant?: string }> = [];
   /** Next refresh answers invalid_grant (as Reddit does for a revoked grant). */
   failNextRefresh: 'invalid_grant' | '500' | null = null;
+  /** Make the Ads API answer like Reddit does when the app or login has no Ads API access. */
+  adsApiRefusal: { status: number; code: string; message: string } | null = null;
+  /** Add a second business the member cannot read ad accounts in (403 on its ad_accounts). */
+  forbiddenBusiness = false;
   private server?: Server;
   baseUrl = '';
 
@@ -110,7 +114,22 @@ export class FakeRedditOAuthServer {
     }
     const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '');
     if (!this.accessTokens.has(bearer)) return json(401, { error: { message: 'bad token' } });
-    if (url.pathname === '/api/v3/me/businesses') return json(200, { data: [{ id: 'biz-1', name: 'Fake Business' }] });
+    if (url.pathname.startsWith('/api/v3/')) {
+      const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+      if (!this.accessTokens.has(bearer)) return json(401, { error: { code: 'UNAUTHORIZED', message: 'invalid bearer token' } });
+      if (this.adsApiRefusal) {
+        const r = this.adsApiRefusal;
+        return json(r.status, { error: { code: r.code, message: r.message } });
+      }
+    }
+    if (url.pathname === '/api/v3/me/businesses') {
+      const data = [{ id: 'biz-1', name: 'Fake Business', industry: 'OTHER' }];
+      if (this.forbiddenBusiness) data.push({ id: 'biz-x', name: 'No Access Business', industry: 'OTHER' });
+      return json(200, { data, pagination: { next_url: null, previous_url: null } });
+    }
+    if (url.pathname === '/api/v3/businesses/biz-x/ad_accounts') {
+      return json(403, { error: { code: 'FORBIDDEN', message: 'member lacks permission on this business' } });
+    }
     if (url.pathname === '/api/v3/businesses/biz-1/ad_accounts') {
       return json(200, {
         data: (this.options.accounts ?? [{ id: 'a2_fake1', name: 'Fake Account', currency: 'USD' }]).map((a) => ({
