@@ -27,7 +27,8 @@ export class FakeRedditOAuthServer {
   /** Next refresh answers invalid_grant (as Reddit does for a revoked grant). */
   failNextRefresh: 'invalid_grant' | '500' | null = null;
   /** Make the Ads API answer like Reddit does when the app or login has no Ads API access. */
-  adsApiRefusal: { status: number; code: string; message: string } | null = null;
+  /** Ads API refusal in Reddit's v3 shape {error:{message, code}}; code is an integer on 404 ("Member ID not found"). */
+  adsApiRefusal: { status: number; code: string | number; message: string } | null = null;
   /** Add a second business the member cannot read ad accounts in (403 on its ad_accounts). */
   forbiddenBusiness = false;
   private server?: Server;
@@ -116,7 +117,10 @@ export class FakeRedditOAuthServer {
     if (!this.accessTokens.has(bearer)) return json(401, { error: { message: 'bad token' } });
     if (url.pathname.startsWith('/api/v3/')) {
       const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '');
-      if (!this.accessTokens.has(bearer)) return json(401, { error: { code: 'UNAUTHORIZED', message: 'invalid bearer token' } });
+      if (!this.accessTokens.has(bearer)) return json(401, {
+          success: false,
+          error: { reason: 'UNAUTHORIZED', explanation: 'This server could not verify that you are authorized to access the document you requested.' },
+        });
       if (this.adsApiRefusal) {
         const r = this.adsApiRefusal;
         return json(r.status, { error: { code: r.code, message: r.message } });

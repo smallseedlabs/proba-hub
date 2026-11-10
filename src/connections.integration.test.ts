@@ -149,6 +149,25 @@ describe('platform connections broker (FAKE Reddit OAuth, real Postgres)', () =>
     for (const t of [...fake.refreshTokens, ...fake.accessTokens, ...fake.codes]) expect(text).not.toContain(t);
   });
 
+  it('a 404 "Member ID not found" on /me/businesses tells the user the Reddit login has no Ads business', async () => {
+    fake.adsApiRefusal = { status: 404, code: 404, message: 'Member ID not found' };
+    try {
+      const res = await connect(owner);
+      expect(res.statusCode).toBe(502);
+      const message: string = res.json().message;
+      expect(message).toContain('HTTP 404, /me/businesses, "Member ID not found"');
+      expect(message).toContain('no advertiser profile or business');
+      expect(message).not.toContain('404, 404');
+    } finally {
+      fake.adsApiRefusal = null;
+    }
+    const audit = await pool.query<{ payload: string }>(
+      `SELECT payload::text AS payload FROM audit_outbox WHERE payload::text LIKE '%list_accounts%' ORDER BY id DESC LIMIT 1`
+    );
+    expect(audit.rows[0]?.payload).toContain('"status": 404');
+    expect(audit.rows[0]?.payload).toContain('Member ID not found');
+  });
+
   it('connects, stores only ciphertext, needs an account pick, then brokers cached short-lived tokens', async () => {
     const res = await connect(owner);
     expect(res.statusCode).toBe(200);
