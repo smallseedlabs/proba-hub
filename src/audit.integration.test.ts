@@ -149,7 +149,7 @@ describe('audit outbox: written in the action’s own transaction', () => {
     try {
       const user = await createTestUser(failing, 'rollback');
       const clientMsgId = randomUUID();
-      // answer_ask has no error-event fallback: a brain failure aborts and rolls back the transaction.
+      // approve_plan has no error-event fallback: a brain failure aborts and rolls back the transaction.
       const res = await failing.inject({
         method: 'POST',
         url: '/v1/commands',
@@ -157,9 +157,9 @@ describe('audit outbox: written in the action’s own transaction', () => {
         payload: {
           kind: 'command',
           clientMsgId,
-          type: 'answer_ask',
+          type: 'approve_plan',
           threadId: user.threadId,
-          payload: { askId: randomUUID(), choice: 'approve' },
+          payload: { planId: randomUUID(), approved: true },
           sentAt: new Date().toISOString(),
         },
       });
@@ -171,7 +171,7 @@ describe('audit outbox: written in the action’s own transaction', () => {
       expect(actions).toContain('command.received');
       expect(actions).toContain('command.accepted');
       // Written inside the rolled-back transaction: must not exist.
-      expect(actions).not.toContain('goal.clarification_answered');
+      expect(actions).not.toContain('approval.granted');
       expect(actions).not.toContain('brain.llm_call');
       expect(actions).not.toContain('command.processed.success');
       const processed = events.filter((e) => e.action === 'command.processed');
