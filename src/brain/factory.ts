@@ -82,7 +82,6 @@ export async function createRuntimeBrain(options: CreateBrainOptions = {}): Prom
     audit: getAudit(),
     budget: {
       maxCompletionTokens: config.brain.limits.maxOutputTokens,
-      maxToolCalls: config.brain.limits.maxToolCallsPerTurn,
     },
   });
 }
