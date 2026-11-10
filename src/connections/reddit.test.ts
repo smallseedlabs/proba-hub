@@ -84,3 +84,18 @@ describe('Reddit connection adapter (FAKE Reddit OAuth server)', () => {
     }
   });
 });
+
+describe('providerErrorFields (Reddit Ads API v3 error shapes)', () => {
+  it('reads {error:{message, code:<int>}}, {success:false,error:{reason,explanation}} and {error:"..."}', async () => {
+    const { providerErrorFields } = await import('./provider.js');
+    expect(providerErrorFields({ error: { message: 'Member ID not found', code: 404 } })).toEqual({
+      providerCode: '404',
+      providerMessage: 'Member ID not found',
+    });
+    expect(providerErrorFields({ success: false, error: { reason: 'UNAUTHORIZED', explanation: 'could not verify' } })).toEqual({
+      providerCode: 'UNAUTHORIZED',
+      providerMessage: 'could not verify',
+    });
+    expect(providerErrorFields({ error: 'invalid_grant' })).toEqual({ providerCode: 'invalid_grant' });
+  });
+});

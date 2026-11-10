@@ -79,9 +79,13 @@ export function providerErrorFields(body: unknown, secrets: string[] = []): { pr
   if (!body || typeof body !== 'object') return {};
   const root = body as Record<string, unknown>;
   const nested = root.error && typeof root.error === 'object' ? (root.error as Record<string, unknown>) : undefined;
-  const pick = (...values: unknown[]) => values.find((v): v is string => typeof v === 'string' && v.trim() !== '');
-  const code = pick(nested?.code, nested?.type, typeof root.error === 'string' ? root.error : undefined, root.code, root.reason);
-  const message = pick(nested?.message, root.message, root.error_description, root.explanation);
+  // Reddit Ads API v3 uses {error:{message, code:<int>}} (OpenAPI components_errors_*) and, at its edge,
+  // {success:false, error:{reason, explanation}}; reddit.com OAuth uses {error:"..."}.
+  const asText = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : v);
+  const pick = (...values: unknown[]) =>
+    values.map(asText).find((v): v is string => typeof v === 'string' && v.trim() !== '');
+  const code = pick(nested?.code, nested?.reason, nested?.type, typeof root.error === 'string' ? root.error : undefined, root.code, root.reason);
+  const message = pick(nested?.message, nested?.explanation, root.message, root.error_description, root.explanation);
   return {
     ...(code && SAFE_CODE.test(code) ? { providerCode: code } : {}),
     ...(message ? { providerMessage: maskKnown(message, secrets).replace(SECRETISH, '[masked]').slice(0, 200) } : {}),
