@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
+import { GatewayClientError } from '../brain/gateway-client.js';
 import { kickOutboxRelay } from './outbox-relay.js';
 import { isBrainOutput } from '@smallseedlabs/proba-protocol';
 import type { BrainPort, BrainGoalUpdate, Command, Event, Thread, Message, Goal, BrainContext } from '../types.js';
@@ -306,7 +307,7 @@ export class CommandProcessor {
           userId,
           envelope.threadId,
           'brain_error',
-          'Failed to process command. Please try again.'
+          brainFailureMessage(cause)
         );
         
         await this.addToOutbox(client, userId, errorEvent.id);
@@ -1913,4 +1914,21 @@ export class CommandProcessor {
       [userId, eventId]
     );
   }
+}
+
+/**
+ * What the person sees when the brain step fails. A gateway preflight block is a deliberate, explained
+ * refusal (nothing was spent), so its reason is shown instead of a generic retry message. The reason is
+ * gateway policy text (capability and config names), never provider output; it is still masked and capped.
+ */
+export function brainFailureMessage(cause: unknown): string {
+  if (cause instanceof GatewayClientError && (cause.code === 'preflight_blocked' || cause.code === 'budget_exhausted')) {
+    const reason = cause.message
+      .replace(/(bearer\s+\S+|eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{32,})/gi, '[masked]')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 400);
+    if (reason) return `Proba could not start this step (nothing was spent): ${reason}`;
+  }
+  return 'Failed to process command. Please try again.';
 }

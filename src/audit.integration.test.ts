@@ -20,6 +20,7 @@ import {
 import { AUDIT_ACTION_INFO } from '@smallseedlabs/proba-protocol/audit';
 import { createTestUser, controlCommand, createGoalCommand, openSSE, waitForEvents, waitUntil } from './test-helpers.js';
 import type { BrainPort } from './types.js';
+import { GatewayClientError } from './brain/gateway-client.js';
 
 /** Actions the Hub may emit: catalogued and `specific` (never generic or alias). */
 const SPECIFIC_ACTIONS = new Set<string>(
@@ -588,6 +589,35 @@ describe('rejected commands, denials and control', () => {
       expect(declined.find((e) => e.action === 'budget.evaluated')).toMatchObject({
         outcome: 'denied', details: { decision: 'declined', enforced: true, decidedBy: 'user' },
       });
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('shows a gateway preflight block reason to the person instead of a generic failure', async () => {
+    const reason = 'proba-llm has no pricing endpoint; /ready is not a unit price';
+    const brain: BrainPort = {
+      process: async () => {
+        throw new GatewayClientError('preflight_blocked', reason, undefined, true);
+      },
+    };
+    const local = await buildApp({ startBackgroundJobs: false, brain });
+    try {
+      const u = await createTestUser(local, 'preflight');
+      const clientMsgId = randomUUID();
+      const res = await local.inject({
+        method: 'POST', url: '/v1/commands', headers: { authorization: `Bearer ${u.token}` },
+        payload: { kind: 'command', clientMsgId, type: 'send_message', threadId: u.threadId, payload: { text: 'hi' }, sentAt: new Date().toISOString() },
+      });
+      expect(JSON.parse(res.body).status).toBe('accepted');
+      const events = await waitForAction(clientMsgId, 'command.processed');
+      expect(events.find((e) => e.action === 'brain.error')).toMatchObject({ errorCode: 'brain_failed' });
+      const row = await pool.query<{ payload: { code: string; message: string } }>(
+        `SELECT payload FROM events WHERE type = 'error' AND thread_id = $1 ORDER BY seq DESC LIMIT 1`,
+        [u.threadId]
+      );
+      expect(row.rows[0].payload.code).toBe('brain_error');
+      expect(row.rows[0].payload.message).toBe(`Proba could not start this step (nothing was spent): ${reason}`);
     } finally {
       await local.close();
     }
