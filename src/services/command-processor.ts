@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
+import { DEFAULT_WORKSPACE_ID } from '../config.js';
+import { reservePendingGoal } from './internal-reads.js';
 import { GatewayClientError } from '../brain/gateway-client.js';
 import { kickOutboxRelay } from './outbox-relay.js';
 import { isBrainOutput } from '@smallseedlabs/proba-protocol';
@@ -159,7 +161,15 @@ export class CommandProcessor {
     envelope: CommandEnvelope
   ): Promise<{ command: Command; events: Event[] }> {
     const startedAt = Date.now();
-    const result = await transaction((client) => this.processInTransaction(client, userId, envelope, startedAt));
+    // Pre-allocate the goal id for create_goal so the bridge assertion can carry it
+    // before the goals row is inserted (after the brain step). The context bridge
+    // authorizes (user, goal) live over a separate connection, so the reservation is
+    // committed first, before the processing transaction takes its own client.
+    const pendingGoalId = envelope.type === 'create_goal' ? randomUUID() : undefined;
+    if (pendingGoalId) await reservePendingGoal({ goalId: pendingGoalId, userId, workspaceId: DEFAULT_WORKSPACE_ID });
+    const result = await transaction((client) =>
+      this.processInTransaction(client, userId, envelope, startedAt, pendingGoalId)
+    );
     // Only now are the events committed and visible to the relay. Kicking from
     // inside the transaction callback raced COMMIT and fell back to the poll.
     void kickOutboxRelay();
@@ -226,7 +236,8 @@ export class CommandProcessor {
     client: PoolClient,
     userId: string,
     envelope: CommandEnvelope,
-    startedAt: number
+    startedAt: number,
+    pendingGoalId: string | undefined
   ): Promise<{ command: Command; events: Event[] }> {
     const audit = getAudit();
     const scope: AuditScope = { userId, threadId: envelope.threadId, commandType: envelope.type };
@@ -276,10 +287,6 @@ export class CommandProcessor {
     const events: Event[] = [];
     // Set when the user declined an ask that carried a cost: the budget is not approved, so nothing launches.
     let budgetDeclined = false;
-    
-    // Pre-allocate goal id for create_goal so the bridge assertion can carry it
-    // before the goals row is inserted (after the brain step).
-    const pendingGoalId = envelope.type === 'create_goal' ? randomUUID() : undefined;
 
     // Commands with special handlers (answer_ask, approve_plan) skip initial brain invocation
     // and invoke it themselves after doing their specific work
@@ -1520,6 +1527,7 @@ export class CommandProcessor {
     goalId?: string
   ): Promise<GoalRow> {
     const userSuppliedInput = userSuppliedInputFromCreateGoal(payload);
+    if (goalId) await client.query(`DELETE FROM goal_reservations WHERE goal_id = $1`, [goalId]);
     const result = await client.query<GoalRow>(
       goalId
         ? `INSERT INTO goals (id, user_id, thread_id, title, description, constraints, budget, status, user_supplied_input)

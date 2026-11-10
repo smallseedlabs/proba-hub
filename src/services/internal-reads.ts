@@ -243,7 +243,31 @@ export async function authorizeActor(params: {
     params.userId,
   ]);
   if (goal.rows.length === 0) {
+    // A create_goal brain step runs before its goals row exists; the Hub reserved that id for this user.
+    const reserved = await pool.query(
+      `SELECT 1 FROM goal_reservations WHERE goal_id = $1 AND user_id = $2 AND workspace_id = $3 AND expires_at > NOW()`,
+      [params.goalId, params.userId, params.workspaceId]
+    );
+    if (reserved.rows.length > 0) return { allowed: true, reason: 'goal_pending' };
     return { allowed: false, reason: 'goal_not_owned' };
   }
   return { allowed: true, reason: 'ok' };
 }
+
+/** How long a pre-allocated create_goal id may be authorized before its goals row exists. */
+export const GOAL_RESERVATION_TTL_SECONDS = 30 * 60;
+
+/**
+ * Reserve a pre-allocated goal id for this user, committed on its own (not in the command transaction) so the
+ * context bridge's authorize call can see it while the brain step runs. Prunes expired reservations.
+ */
+export async function reservePendingGoal(params: { goalId: string; userId: string; workspaceId: string }): Promise<void> {
+  await pool.query(`DELETE FROM goal_reservations WHERE expires_at <= NOW()`);
+  await pool.query(
+    `INSERT INTO goal_reservations (goal_id, user_id, workspace_id, expires_at)
+     VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+     ON CONFLICT (goal_id) DO NOTHING`,
+    [params.goalId, params.userId, params.workspaceId, GOAL_RESERVATION_TTL_SECONDS]
+  );
+}
+

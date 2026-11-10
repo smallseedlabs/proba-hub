@@ -6,6 +6,7 @@ import { pool } from './db/client.js';
 import { createAssertionRuntime } from './auth/assertions/runtime.js';
 import { createContextBridgeSigners } from './auth/assertions/testing.js';
 import { createTestUser } from './test-helpers.js';
+import { reservePendingGoal } from './services/internal-reads.js';
 import { setAuditForTests, createHubAudit, type HubAudit } from './audit/service.js';
 import { PostgresOutboxStore } from './audit/vendor/proba-audit/index.js';
 
@@ -184,6 +185,26 @@ describe('context-reader internal routes', () => {
     const texts = body.messages.map((m: { text: string }) => m.text).join('\n');
     expect(texts).not.toMatch(/sk-live-abcdefghijklmnopqrstuv/);
     expect(texts).not.toMatch(/owner@example\.com/);
+  });
+
+  it('authorizes a create_goal id reserved for its user before the goals row exists, and nobody else', async () => {
+    const pending = randomUUID();
+    const call = (userId: string, threadId: string) =>
+      bridgeCall('POST', '/v1/internal/authorize', {
+        actorId: userId,
+        workspaceId: 'seedbed',
+        goalId: pending,
+        threadId,
+        body: { userId, workspaceId: 'seedbed', goalId: pending },
+      });
+    expect(JSON.parse((await call(owner.userId, owner.threadId)).body)).toMatchObject({ allowed: false, reason: 'goal_not_owned' });
+
+    await reservePendingGoal({ goalId: pending, userId: owner.userId, workspaceId: 'seedbed' });
+    expect(JSON.parse((await call(owner.userId, owner.threadId)).body)).toEqual({ allowed: true, reason: 'goal_pending' });
+    expect(JSON.parse((await call(other.userId, other.threadId)).body)).toMatchObject({ allowed: false, reason: 'goal_not_owned' });
+
+    await pool.query(`UPDATE goal_reservations SET expires_at = NOW() - INTERVAL '1 second' WHERE goal_id = $1`, [pending]);
+    expect(JSON.parse((await call(owner.userId, owner.threadId)).body)).toMatchObject({ allowed: false, reason: 'goal_not_owned' });
   });
 
   it('authorizes the owner and refuses another user for the same goal', async () => {
