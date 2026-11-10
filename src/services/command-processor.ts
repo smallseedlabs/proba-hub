@@ -426,6 +426,9 @@ export class CommandProcessor {
         }
       }
 
+      // If the brain step behind this answer fails, the answer is undone so the
+      // ask stays pending and the card can be answered again.
+      await client.query('SAVEPOINT answer_ask');
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
       await this.auditAskAnswered(client, scope, answerPayload, resolvedAskType);
@@ -439,9 +442,29 @@ export class CommandProcessor {
       // After recording the answer, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
       this.attachOperatorScope(context, brainEnvelope);
-      const called = await this.callBrain(client, scope, brainEnvelope, context, {
-        askType: resolvedAskType,
-      });
+      let called: Awaited<ReturnType<CommandProcessor['callBrain']>>;
+      try {
+        called = await this.callBrain(client, scope, brainEnvelope, context, {
+          askType: resolvedAskType,
+        });
+      } catch (error) {
+        if (!(error instanceof BrainCallError)) throw error;
+        await client.query('ROLLBACK TO SAVEPOINT answer_ask');
+        const cause = error.cause;
+        logger.error({ error: cause, userId, askId: answerPayload.askId }, 'Brain processing failed after answer_ask');
+        const errorEvent = await this.createErrorEvent(
+          client,
+          userId,
+          envelope.threadId,
+          'brain_error',
+          brainFailureMessage(cause, { answeringAsk: true }),
+          { askId: String(answerPayload.askId), retryable: true }
+        );
+        await this.addToOutbox(client, userId, errorEvent.id);
+        await this.auditBrainFailure(client, scope, error, cause);
+        await this.auditProcessed(client, scope, startedAt, [errorEvent], 'failure', 'brain_error');
+        return { command, events: [errorEvent] };
+      }
       const brainSpan = called.span;
       const brainOutputs = budgetDeclined
         ? await this.enforceBudgetDecline(client, scope, called.outputs, String(answerPayload.askId), brainSpan)
@@ -642,7 +665,13 @@ export class CommandProcessor {
                 stepId: this.lastAttachedStep.stepId,
                 stepType: this.lastAttachedStep.stepType,
               }
-            : { bridge: this.bridge?.enabled ? 'failed' : 'off' }),
+            : {
+                bridge: this.brain.ownsExternalContext
+                  ? 'delegated'
+                  : this.bridge?.enabled
+                    ? 'failed'
+                    : 'off',
+              }),
           // Types and sizes only: never the text the brain produced.
           outputs: outputs.slice(0, 20).map(summarizeOutput),
         },
@@ -1896,7 +1925,8 @@ export class CommandProcessor {
     userId: string,
     threadId: string | undefined,
     code: string,
-    message: string
+    message: string,
+    extra: { askId?: string; retryable?: boolean } = {}
   ): Promise<Event> {
     const seq = await this.getNextSeq(client, userId);
     
@@ -1906,7 +1936,7 @@ export class CommandProcessor {
        RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
                  payload, ui_payload_id as "uiPayloadId", fallback_text as "fallbackText",
                  created_at as "createdAt"`,
-      [userId, seq, threadId, toJsonb({ code, message })]
+      [userId, seq, threadId, toJsonb({ code, message, ...extra })]
     );
 
     return result.rows[0];
@@ -1929,14 +1959,37 @@ export class CommandProcessor {
  * refusal (nothing was spent), so its reason is shown instead of a generic retry message. The reason is
  * gateway policy text (capability and config names), never provider output; it is still masked and capped.
  */
-export function brainFailureMessage(cause: unknown): string {
-  if (cause instanceof GatewayClientError && (cause.code === 'preflight_blocked' || cause.code === 'budget_exhausted')) {
-    const reason = cause.message
-      .replace(/(bearer\s+\S+|eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{32,})/gi, '[masked]')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 400);
-    if (reason) return `Proba could not start this step (nothing was spent): ${reason}`;
+export function brainFailureMessage(cause: unknown, options: { answeringAsk?: boolean } = {}): string {
+  const retry = options.answeringAsk
+    ? ' Your answer was not recorded; the card is still open, so you can answer it again.'
+    : ' Please try again.';
+  if (!(cause instanceof GatewayClientError)) return `Failed to process command.${retry}`;
+  const reason = safeReason(cause.message);
+  switch (cause.code) {
+    case 'preflight_blocked':
+    case 'budget_exhausted':
+      if (reason) return `Proba could not start this step (nothing was spent): ${reason}`;
+      break;
+    case 'policy_denied':
+      return `Proba stopped this step because a tool request was refused by policy (nothing was spent)${reason ? `: ${reason}.` : '.'}${retry}`;
+    case 'idempotency_conflict':
+      return `Proba could not resume this step: the request did not match the original run (nothing was spent).${retry}`;
+    case 'approval_expired':
+    case 'approval_mismatch':
+      return 'This approval is no longer pending in Proba, so nothing was run. Refresh the thread to see the current request.';
+    case 'unreachable':
+    case 'timeout':
+      return `Proba's planner could not be reached (nothing was spent).${retry}`;
   }
-  return 'Failed to process command. Please try again.';
+  return `Failed to process command.${retry}`;
+}
+
+/** Gateway reasons are policy/config text, never provider output; still masked, collapsed and capped. */
+function safeReason(message: string): string {
+  return message
+    .replace(/(bearer\s+\S+|eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{32,})/gi, '[masked]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.$/, '')
+    .slice(0, 400);
 }
