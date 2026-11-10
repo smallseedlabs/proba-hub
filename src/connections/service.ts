@@ -252,10 +252,15 @@ export class ConnectionsService {
       logger.warn({ provider, errorCode: code, grantedScopes: tokens.scopes, ...detail }, 'platform connection: listing ad accounts failed');
       await this.auditConnect(userId, provider, undefined, 'failure', code, { provider_error: detail });
       const hint =
-        detail.status === 401 || detail.status === 403
-          ? ' The sign-in worked, but the provider refused access to its Ads API for this app or login.'
-          : '';
-      throw new ConnectionError('accounts_unavailable', `Could not list your ad accounts on the provider${describeDetail(detail)}.${hint} Start again.`, 502);
+        detail.status === 404 && detail.path === '/me/businesses'
+          ? // Reddit Ads API v3: 404 on /me/businesses = no Ads member for this login ("Member ID not found").
+            ' The sign-in worked, but Reddit Ads has no advertiser profile or business for the Reddit login you approved with.' +
+            ' Open ads.reddit.com with that same Reddit account and finish its business and ad account setup' +
+            ' (or approve with the Reddit account that is a member of your business), then'
+          : detail.status === 401 || detail.status === 403
+            ? ' The sign-in worked, but the provider refused access to its Ads API for this app or login.'
+            : '';
+      throw new ConnectionError('accounts_unavailable', `Could not list your ad accounts on the provider${describeDetail(detail)}.${hint}${hint.endsWith('then') ? ' start again.' : ' Start again.'}`, 502);
     }
 
     const connectionId = randomUUID();
@@ -587,6 +592,8 @@ function providerDetail(err: unknown, step: ProviderErrorDetail['step']): Provid
 }
 
 function describeDetail(detail: ProviderErrorDetail): string {
-  const parts = [detail.status ? `HTTP ${detail.status}` : '', detail.path ?? '', detail.providerCode ?? ''].filter(Boolean);
+  const code = detail.providerCode && detail.providerCode !== String(detail.status) ? detail.providerCode : '';
+  const message = detail.providerMessage ? `"${detail.providerMessage.slice(0, 120)}"` : '';
+  const parts = [detail.status ? `HTTP ${detail.status}` : '', detail.path ?? '', code, message].filter(Boolean);
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
