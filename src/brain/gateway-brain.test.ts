@@ -398,4 +398,100 @@ describe('GatewayBrain', () => {
       code: 'preflight_blocked',
     });
   });
+
+  it('carries the goal creative saved after run creation into the approval resume (same URL only)', async () => {
+    const landing = 'https://operator-entered.example/path';
+    const creative = { type: 'TEXT' as const, headline: 'FAKE headline', body: 'FAKE body' };
+    const firstId = randomUUID();
+    const store = new MemoryGatewayRunStore();
+    const client = fakeClient((req) =>
+      req.resume
+        ? { runId: firstId, status: 'completed', iteration: 2, outputs: [{ type: 'reply', text: 'ok' }] }
+        : awaiting(firstId, askId, 'page.attach_user_page')
+    );
+    await makeBrain(client, { store }).process(
+      command('create_goal', { title: 'Launch', userSuppliedInput: { landingPageUrl: landing } }),
+      context({ userSuppliedInput: { landingPageUrl: landing } })
+    );
+    expect(client.calls[0]?.userSuppliedInput).toEqual({ landingPageUrl: landing });
+
+    await makeBrain(client, { store }).process(
+      command('answer_ask', { askId, choice: 'approve', askType: 'action_approval' }),
+      context({ userSuppliedInput: { landingPageUrl: landing, creative, targeting: { communities: ['FAKEsub'] } } })
+    );
+    expect(client.calls[1]?.idempotencyKey).toBe(client.calls[0]?.idempotencyKey);
+    expect(client.calls[1]?.command).toEqual(client.calls[0]?.command);
+    expect(client.calls[1]?.userSuppliedInput).toEqual({
+      landingPageUrl: landing,
+      creative,
+      targeting: { communities: ['FAKEsub'] },
+    });
+  });
+
+  it('never swaps the stored landing URL on resume', async () => {
+    const landing = 'https://operator-entered.example/path';
+    const firstId = randomUUID();
+    const store = new MemoryGatewayRunStore();
+    const client = fakeClient((req) =>
+      req.resume
+        ? { runId: firstId, status: 'completed', iteration: 2, outputs: [{ type: 'reply', text: 'ok' }] }
+        : awaiting(firstId, askId, 'page.attach_user_page')
+    );
+    await makeBrain(client, { store }).process(
+      command('create_goal', { title: 'Launch', userSuppliedInput: { landingPageUrl: landing } }),
+      context({ userSuppliedInput: { landingPageUrl: landing } })
+    );
+    await makeBrain(client, { store }).process(
+      command('answer_ask', { askId, choice: 'approve', askType: 'action_approval' }),
+      context({
+        userSuppliedInput: {
+          landingPageUrl: 'https://other.example/',
+          creative: { type: 'TEXT', headline: 'h', body: 'b' },
+        },
+      })
+    );
+    expect(client.calls[1]?.userSuppliedInput).toEqual({ landingPageUrl: landing });
+  });
+
+  it('marks a failed run snapshot with its run status so Hub can close the card', async () => {
+    const client = fakeClient(() => ({
+      runId: randomUUID(),
+      status: 'failed',
+      iteration: 1,
+      error: { code: 'policy_denied', message: 'refused', retryable: false },
+    }));
+    await expect(makeBrain(client).process(command('send_message', { text: 'go' }), context())).rejects.toMatchObject({
+      code: 'policy_denied',
+      retryable: false,
+      runStatus: 'failed',
+    });
+  });
+
+  it('flags a blocked resume as consuming the ask (the run left awaiting_approval)', async () => {
+    const firstId = randomUUID();
+    const store = new MemoryGatewayRunStore();
+    const client = fakeClient((req) =>
+      req.resume
+        ? {
+            runId: firstId,
+            status: 'blocked',
+            iteration: 2,
+            error: { code: 'preflight_blocked', message: 'context build failed', retryable: true },
+          }
+        : awaiting(firstId, askId)
+    );
+    await makeBrain(client, { store }).process(command('send_message', { text: 'pause it' }), context());
+    await expect(
+      makeBrain(client, { store }).process(command('answer_ask', { askId, choice: 'approve', askType: 'action_approval' }), context())
+    ).rejects.toMatchObject({ code: 'preflight_blocked', runStatus: 'blocked', askConsumed: true });
+    const blockedFresh = fakeClient(() => ({
+      runId: randomUUID(),
+      status: 'blocked',
+      iteration: 0,
+      error: { code: 'preflight_blocked', message: 'x', retryable: true },
+    }));
+    await expect(makeBrain(blockedFresh).process(command('send_message', { text: 'go' }), context())).rejects.toMatchObject({
+      askConsumed: false,
+    });
+  });
 });

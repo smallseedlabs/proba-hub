@@ -80,7 +80,11 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
           idempotencyKey: command.clientMsgId,
         });
 
-    const base = pending ? pending.request : this.buildRequest(command, context, { workspaceId, userId, threadId, goalId });
+    const base = pending
+      ? resume
+        ? withCurrentOperatorScope(pending.request, context.userSuppliedInput)
+        : pending.request
+      : this.buildRequest(command, context, { workspaceId, userId, threadId, goalId });
     const request: GatewayRunRequest = {
       ...durableGatewayRequest(base),
       ...(resume ? { resume } : {}),
@@ -117,10 +121,15 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       return this.outputsOrThrow(gathered);
     }
 
-    return this.outputsOrThrow(snapshot);
+    return this.outputsOrThrow(snapshot, { resumed: !!resume });
   }
 
-  private outputsOrThrow(snapshot: GatewayRunSnapshot): BrainOutput[] {
+  /**
+   * A resumed run that ends blocked/failed/ambiguous has left awaiting_approval, so bindResume
+   * will refuse the same ask next time (approval_expired): the error says so (runStatus), and
+   * Hub closes the card instead of reopening it.
+   */
+  private outputsOrThrow(snapshot: GatewayRunSnapshot, options: { resumed?: boolean } = {}): BrainOutput[] {
     if (snapshot.status === 'awaiting_approval' || snapshot.status === 'completed') {
       return outputsOf(snapshot);
     }
@@ -129,7 +138,9 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
         snapshot.error?.code ?? snapshot.status,
         snapshot.error?.message ?? `gateway run ${snapshot.status}`,
         undefined,
-        snapshot.error?.retryable ?? snapshot.status === 'blocked'
+        snapshot.error?.retryable ?? snapshot.status === 'blocked',
+        snapshot.status,
+        options.resumed === true
       );
     }
     if (snapshot.status === 'cancelled' || snapshot.status === 'paused' || snapshot.status === 'stopped') {
@@ -351,6 +362,29 @@ function resumeFromCommand(command: CommandEnvelope): GatewayRunRequest['resume'
     };
   }
   return undefined;
+}
+
+/**
+ * On an approval resume the stored request is replayed, but the operator may have saved
+ * post copy / targeting for the goal since the run was created (PUT /v1/goals/:id/creative).
+ * Carry the goal's current creative/targeting; the landing URL stays the stored one (a new
+ * URL is an edit, a new input revision). The gateway binds everything else on resume.
+ */
+export function withCurrentOperatorScope(
+  stored: GatewayRunRequest,
+  current: BrainContext['userSuppliedInput']
+): GatewayRunRequest {
+  const storedInput = stored.userSuppliedInput;
+  if (!storedInput || !current || current.landingPageUrl !== storedInput.landingPageUrl) return stored;
+  const { creative: _creative, targeting: _targeting, ...rest } = storedInput;
+  return {
+    ...stored,
+    userSuppliedInput: {
+      ...rest,
+      ...(current.creative ? { creative: current.creative } : {}),
+      ...(current.targeting ? { targeting: current.targeting } : {}),
+    },
+  };
 }
 
 function scopedCommand(command: CommandEnvelope, workspaceId: string): CommandEnvelope {

@@ -22,7 +22,6 @@ async function run(
     payload: { kind: 'command', clientMsgId, type, threadId: user.threadId, payload, sentAt: new Date().toISOString() },
   });
   expect(JSON.parse(res.body).status).toBe('accepted');
-  // A failed brain step leaves the command accepted (same as other brain failures); callers wait on events.
   if (waitProcessed) await waitForCommandStatus(user.userId, clientMsgId, 'processed', { timeout: 10000 });
   return clientMsgId;
 }
@@ -56,7 +55,9 @@ describe('a failed brain step after answer_ask leaves the ask open for retry', (
     const ask = events.find((e) => e.type === 'ask');
     const askId = ask.payload.askId as string;
 
-    await run(app, user, 'answer_ask', { askId, choice: 'approve' }, false);
+    const failedMsgId = await run(app, user, 'answer_ask', { askId, choice: 'approve' }, false);
+    // A failed brain step finishes the command as failed; it never stays accepted.
+    await waitForCommandStatus(user.userId, failedMsgId, 'failed', { timeout: 10000 });
     events = await waitForEvents(app, user.token, (evs) => evs.some((e) => e.type === 'error'));
     const error = events.find((e) => e.type === 'error');
     expect(error.payload).toMatchObject({ code: 'brain_error', askId, retryable: true });

@@ -66,7 +66,7 @@ export async function waitUntil(
 export async function waitForCommandStatus(
   userId: string,
   clientMsgId: string,
-  status: 'accepted' | 'processed' | 'rejected',
+  status: 'accepted' | 'processed' | 'rejected' | 'failed',
   { timeout = 5000, interval = 20 }: WaitForOptions = {}
 ): Promise<void> {
   await waitUntil(
