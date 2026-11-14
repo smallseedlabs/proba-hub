@@ -81,7 +81,8 @@ describe('brain campaign reviewer (FAKE gateway, real Postgres)', () => {
     clock = new Date(created.getTime() + 60_000);
 
     // Not before the minimum interval after launch.
-    const calls = () => fake.calls.filter((c) => (c.command.payload as Record<string, unknown>).probaCampaignId === campaignId);
+    const payloadOf = (c: unknown) => ((c as { command: { payload: Record<string, any> } }).command.payload);
+    const calls = () => fake.calls.filter((c) => payloadOf(c).probaCampaignId === campaignId);
     await service.scheduleTick();
     expect(calls()).toHaveLength(0);
 
@@ -97,7 +98,7 @@ describe('brain campaign reviewer (FAKE gateway, real Postgres)', () => {
     });
     await service.scheduleTick();
     expect(calls()).toHaveLength(1);
-    const payload = calls()[0]!.command.payload as Record<string, any>;
+    const payload = payloadOf(calls()[0]);
     expect(payload).toMatchObject({ reviewIntent: 'brain', reviewTrigger: 'schedule', currentDailyBudget: 5, reviewBounds: { minCheckHours: 6, maxCheckHours: 72 } });
     expect(payload.checkpoint).toBeUndefined();
     let row = await campaignRow(campaignId);
@@ -128,7 +129,7 @@ describe('brain campaign reviewer (FAKE gateway, real Postgres)', () => {
     });
     await service.scheduleTick();
     expect(calls()).toHaveLength(2);
-    expect((calls()[1]!.command.payload as Record<string, unknown>).wakeEvent).toBe('ad_disapproved');
+    expect(payloadOf(calls()[1]).wakeEvent).toBe('ad_disapproved');
     row = await campaignRow(campaignId);
     expect(row.wake_event).toBeNull();
     const proposals = await pool.query(`SELECT * FROM analytics_proposals WHERE proba_campaign_id = $1`, [campaignId]);
@@ -151,7 +152,7 @@ describe('brain campaign reviewer (FAKE gateway, real Postgres)', () => {
     });
     await service.scheduleTick();
     expect(calls()).toHaveLength(3);
-    expect((calls()[2]!.command.payload as Record<string, unknown>).checkpoint).toBe('day3');
+    expect(payloadOf(calls()[2]).checkpoint).toBe('day3');
     row = await campaignRow(campaignId);
     expect(row.checkpoints_done).toEqual(['day3']);
 
@@ -165,5 +166,16 @@ describe('brain campaign reviewer (FAKE gateway, real Postgres)', () => {
       [campaignId]
     );
     expect(audit.rows.some((r) => r.d.reviewer === 'brain' && r.d.decision === 'change' && r.d.grantsSpend === false)).toBe(true);
+
+    // Goal page: next check, spend vs cap, recent decisions; metrics the fake did not report stay null.
+    const status = await inject('GET', `/v1/goals/${goal.rows[0]!.id}/status`);
+    expect(status.statusCode).toBe(200);
+    const body = JSON.parse(status.body);
+    expect(body.now).toMatchObject({ state: 'awaiting_approval', pendingProposals: 1 });
+    expect(body.next).toMatchObject({ reason: 'day 5 look', probaCampaignId: campaignId });
+    expect(body.spend).toMatchObject({ spent: null, dailyCap: 5, currency: 'USD' });
+    expect(body.decisions[0]).toMatchObject({ kind: 'checkpoint', summary: 'Behind on clicks.' });
+    expect(body.decisions.find((d: Record<string, any>) => d.decision === 'change').proposal).toMatchObject({ verb: 'ads.update_campaign', status: 'pending' });
+    expect((await inject('GET', `/v1/goals/${randomUUID()}/status`)).statusCode).toBe(404);
   });
 });

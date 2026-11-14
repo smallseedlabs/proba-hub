@@ -80,6 +80,27 @@ export interface AnalyticsCampaign {
   updatedAt: string;
 }
 
+export interface GoalStatus {
+  goal: { id: string; title: string; status: string };
+  plan: Record<string, unknown> | null;
+  now: {
+    state: 'no_campaign' | 'awaiting_approval' | 'running';
+    campaigns: Array<{
+      probaCampaignId: string;
+      platform: string;
+      currentDailyBudget: number | null;
+      currency: string | null;
+      reviewEnabled: boolean;
+      lastReviewedAt: string | null;
+    }>;
+    pendingProposals: number;
+  };
+  next: { checkAt: string; reason: string | null; probaCampaignId: string } | null;
+  spend: { spent: number | null; dailyCap: number | null; totalCap: number | null; currency: string | null };
+  progress: { metric: string | null; target: number | null; actual: number | null; checkpointsDone: string[] };
+  decisions: Array<Record<string, unknown>>;
+}
+
 export interface AnalyticsReview {
   id: string;
   probaCampaignId: string;
@@ -1117,6 +1138,136 @@ export class AnalyticsService {
       { bestEffort: true }
     );
     return campaignRow(result.rows[0]);
+  }
+
+  // ---------------------------------------------------------------- goal page
+
+  /**
+   * One read for the goal page: Now / Next / Spend vs cap / Progress / Recent decisions. Numbers come only
+   * from the latest audited review metrics; anything missing is null (unknown), never zero.
+   */
+  async goalStatus(userId: string, goalId: string): Promise<GoalStatus> {
+    const goal = await pool.query(
+      `SELECT id, title, status, budget, to_jsonb(g) -> 'approved_plan' AS plan FROM goals g WHERE id = $1 AND user_id = $2`,
+      [goalId, userId]
+    );
+    const g = goal.rows[0];
+    if (!g) throw new AnalyticsError('goal_not_found', 'goal not found', 404);
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3 ORDER BY created_at`,
+        [this.workspaceId, userId, goalId]
+      )
+    ).rows.map(campaignRow);
+    const ids = campaigns.map((c) => c.probaCampaignId);
+    const reviews = ids.length
+      ? (
+          await pool.query(
+            `SELECT * FROM analytics_reviews WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = ANY($3)
+               AND status = 'completed' ORDER BY created_at DESC LIMIT 20`,
+            [this.workspaceId, userId, ids]
+          )
+        ).rows.map(reviewRow)
+      : [];
+    const proposals = ids.length
+      ? (
+          await pool.query(
+            `SELECT id, review_id, verb, status, created_at FROM analytics_proposals
+             WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = ANY($3) ORDER BY created_at DESC LIMIT 20`,
+            [this.workspaceId, userId, ids]
+          )
+        ).rows
+      : [];
+    const plan = asRecord(g.plan) ?? null;
+    const budget = asRecord(g.budget) ?? {};
+
+    // Latest audited metrics per campaign (from the newest completed review that has metrics).
+    const latest = new Map<string, Record<string, unknown>[]>();
+    for (const r of reviews) {
+      const rows = Array.isArray(r.summary?.metrics) ? (r.summary!.metrics as Record<string, unknown>[]) : [];
+      if (rows.length > 0 && !latest.has(r.probaCampaignId)) latest.set(r.probaCampaignId, rows);
+    }
+    const sumOf = (field: string): number | null => {
+      if (campaigns.length === 0 || latest.size < campaigns.length) return null;
+      let total = 0;
+      for (const rows of latest.values()) {
+        for (const row of rows) {
+          const v = row[field];
+          if (typeof v !== 'number') return null;
+          total += v;
+        }
+      }
+      return total;
+    };
+    const spent = sumOf('spend');
+    const clicks = sumOf('clicks');
+    const impressions = sumOf('impressions');
+    const conversions = sumOf('conversions');
+    const metric = typeof plan?.successMetric === 'string' ? plan.successMetric : null;
+    const actual =
+      metric === 'clicks' ? clicks
+      : metric === 'conversions' || metric === 'signups' ? conversions
+      : metric === 'ctr' ? (clicks !== null && impressions ? clicks / impressions : null)
+      : metric === 'cpc' ? (spent !== null && clicks ? spent / clicks : null)
+      : null;
+    const nextRow = campaigns
+      .filter((c) => c.reviewEnabled && c.nextCheckAt)
+      .sort((a, b) => Date.parse(a.nextCheckAt!) - Date.parse(b.nextCheckAt!))[0];
+    const dailyCap = campaigns.every((c) => c.currentDailyBudget !== null) && campaigns.length > 0
+      ? campaigns.reduce((t, c) => t + (c.currentDailyBudget ?? 0), 0)
+      : null;
+    const proposalByReview = new Map(proposals.map((p) => [String(p.review_id), p]));
+    const decisions = reviews
+      .filter((r) => r.summary?.review)
+      .slice(0, 10)
+      .map((r) => {
+        const note = reviewNoteOf(r.summary)!;
+        const p = proposalByReview.get(r.id);
+        return {
+          at: r.createdAt,
+          probaCampaignId: r.probaCampaignId,
+          trigger: r.trigger,
+          kind: note.kind ?? 'review',
+          decision: note.decision ?? null,
+          summary: note.summary ?? null,
+          whyNowOrNotYet: note.whyNowOrNotYet ?? null,
+          nextCheckAt: note.nextCheckAt ?? null,
+          nextCheckReason: note.nextCheckReason ?? null,
+          checkpoint: (note.checkpoint as Record<string, unknown> | undefined) ?? null,
+          proposal: p ? { id: String(p.id), verb: String(p.verb), status: String(p.status) } : null,
+        };
+      });
+    const pending = proposals.filter((p) => p.status === 'pending').length;
+    return {
+      goal: { id: String(g.id), title: String(g.title), status: String(g.status) },
+      plan,
+      now: {
+        state: campaigns.length === 0 ? 'no_campaign' : pending > 0 ? 'awaiting_approval' : 'running',
+        campaigns: campaigns.map((c) => ({
+          probaCampaignId: c.probaCampaignId,
+          platform: c.platform,
+          currentDailyBudget: c.currentDailyBudget,
+          currency: c.currency,
+          reviewEnabled: c.reviewEnabled,
+          lastReviewedAt: c.lastReviewedAt,
+        })),
+        pendingProposals: pending,
+      },
+      next: nextRow ? { checkAt: nextRow.nextCheckAt!, reason: nextRow.nextCheckReason, probaCampaignId: nextRow.probaCampaignId } : null,
+      spend: {
+        spent,
+        dailyCap,
+        totalCap: typeof budget.total === 'number' ? budget.total : null,
+        currency: campaigns.find((c) => c.currency)?.currency ?? (typeof budget.currency === 'string' ? budget.currency : null),
+      },
+      progress: {
+        metric,
+        target: typeof plan?.successTarget === 'number' ? plan.successTarget : null,
+        actual,
+        checkpointsDone: [...new Set(campaigns.flatMap((c) => c.checkpointsDone))],
+      },
+      decisions,
+    };
   }
 
   // ---------------------------------------------------------------- helpers

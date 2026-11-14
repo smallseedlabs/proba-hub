@@ -242,6 +242,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Goal page: Now / Next / Spend vs cap / Progress / Recent decisions (audited numbers only; unknown is null).
+  fastify.get<{ Params: { goalId: string } }>(
+    '/goals/:goalId/status',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.goalStatus(request.user!.id, request.params.goalId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Operator-approved creative/targeting for Reddit post creation on a goal.
   fastify.get<{ Params: { goalId: string } }>(
     '/goals/:goalId/creative',
