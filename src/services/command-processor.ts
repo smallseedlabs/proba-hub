@@ -28,7 +28,7 @@ import {
 import { researchReviewFromBrainOutput } from '../brain/research-snapshot.js';
 import { parseApprovedCreative, parseApprovedTargeting } from '../analytics/creative.js';
 import type { ApprovedCreative } from '../brain/gateway-client.js';
-import { CREATIVE_DRAFT_VERB, creativeFromDraftAnswer, draftFromParameters, type CreativeDraft } from '../analytics/creative-draft.js';
+import { CREATIVE_DRAFT_VERB, creativeFromDraftAnswer, draftFromParameters, planFromDraftAnswer, type CreativeDraft, type DraftPlan } from '../analytics/creative-draft.js';
 import {
   userSuppliedInputFromCommand,
   userSuppliedInputFromCreateGoal,
@@ -128,8 +128,11 @@ interface DraftAskEnvelope {
 
 /** Turn the generic tool approval card into an editable post-draft card (web renders props.creativeDraft). */
 function decorateCreativeDraftAsk(envelope: DraftAskEnvelope, draft: CreativeDraft): void {
-  const title = 'Review the Reddit post Proba drafted';
-  const description = 'Approve to save it as this goal’s post copy, or edit it first. Nothing is posted or spent from this card.';
+  const isPlan = Boolean(draft.targeting || draft.plan);
+  const title = isPlan ? 'Review the campaign plan Proba drafted' : 'Review the Reddit post Proba drafted';
+  const description = isPlan
+    ? 'Copy, targeting and success metric in one place. Approve to save them for this goal, or change anything first. Nothing is posted or spent from this card; launching has its own card.'
+    : 'Approve to save it as this goal’s post copy, or edit it first. Nothing is posted or spent from this card.';
   envelope.payload.title = title;
   envelope.payload.description = description;
   envelope.payload.questions = [
@@ -162,6 +165,8 @@ function decorateCreativeDraftAsk(envelope: DraftAskEnvelope, draft: CreativeDra
           claims: draft.claims,
           landingPageUrl: draft.landingPageUrl,
         },
+        ...(draft.targeting ? { targeting: draft.targeting } : {}),
+        ...(draft.plan ? { plan: draft.plan } : {}),
       },
     };
   }
@@ -495,7 +500,10 @@ export class CommandProcessor {
       // ask stays pending and the card can be answered again.
       await client.query('SAVEPOINT answer_ask');
       if (creativeAnswer?.ok && creativeAnswer.creative) {
-        await this.saveDraftedCreative(client, scope, envelope.threadId!, String(answerPayload.askId), creativeAnswer.creative, creativeAnswer.edited);
+        await this.saveDraftedCreative(client, scope, envelope.threadId!, String(answerPayload.askId), creativeAnswer.creative, creativeAnswer.edited, {
+          targeting: creativeAnswer.targeting,
+          plan: creativeAnswer.plan,
+        });
       }
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
@@ -1594,7 +1602,11 @@ export class CommandProcessor {
     client: PoolClient,
     threadId: string,
     payload: AnswerAskPayload
-  ): Promise<{ ok: true; creative?: ApprovedCreative; edited: boolean } | { ok: false; error: string } | undefined> {
+  ): Promise<
+    | { ok: true; creative?: ApprovedCreative; targeting?: Record<string, unknown>; plan?: DraftPlan; edited: boolean }
+    | { ok: false; error: string }
+    | undefined
+  > {
     if (typeof payload.askId !== 'string' || !UUID_RE.test(payload.askId)) return undefined;
     const row = (
       await client.query<{ creativeDraft: unknown; status: string }>(
@@ -1609,7 +1621,17 @@ export class CommandProcessor {
     const values = payload.values && typeof payload.values === 'object' ? (payload.values as Record<string, unknown>) : undefined;
     const result = creativeFromDraftAnswer(draft, values);
     if (!result.ok) return { ok: false, error: `Post copy not saved: ${result.error}` };
-    return result;
+    const planned = planFromDraftAnswer(draft, values);
+    if (!planned.ok) return { ok: false, error: `Plan not saved: ${planned.error}` };
+    const targeting = planned.targeting ? parseApprovedTargeting(planned.targeting) : undefined;
+    if (targeting && !targeting.ok) return { ok: false, error: `Plan not saved: ${targeting.error}` };
+    return {
+      ok: true,
+      creative: result.creative,
+      ...(targeting?.ok && targeting.targeting ? { targeting: targeting.targeting } : {}),
+      ...(planned.plan ? { plan: planned.plan } : {}),
+      edited: result.edited || planned.edited,
+    };
   }
 
   /** Save an approved draft as the goal creative (same column the Campaigns post form writes), audited without the copy. */
@@ -1619,13 +1641,16 @@ export class CommandProcessor {
     threadId: string,
     askId: string,
     creative: ApprovedCreative,
-    edited: boolean
+    edited: boolean,
+    extra: { targeting?: Record<string, unknown>; plan?: DraftPlan } = {}
   ): Promise<void> {
+    // Targeting/plan are written only when the card proposed them; an operator override saved earlier stays otherwise.
     const updated = await client.query<{ id: string }>(
-      `UPDATE goals SET approved_creative = $1, creative_approved_at = NOW(), updated_at = NOW()
+      `UPDATE goals SET approved_creative = $1, creative_approved_at = NOW(), updated_at = NOW(),
+              approved_targeting = COALESCE($4, approved_targeting), approved_plan = COALESCE($5, approved_plan)
        WHERE id = (SELECT id FROM goals WHERE thread_id = $2 AND user_id = $3 ORDER BY created_at DESC LIMIT 1)
        RETURNING id`,
-      [toJsonb(creative), threadId, scope.userId]
+      [toJsonb(creative), threadId, scope.userId, extra.targeting ? toJsonb(extra.targeting) : null, extra.plan ? toJsonb(extra.plan) : null]
     );
     const goalId = updated.rows[0]?.id;
     await getAudit().emit(
@@ -1642,6 +1667,8 @@ export class CommandProcessor {
           edited,
           creativeType: creative.type,
           headlineLength: creative.headline.length,
+          hasTargeting: Boolean(extra.targeting),
+          successMetric: extra.plan?.successMetric ?? null,
         },
       },
       { tx: client }

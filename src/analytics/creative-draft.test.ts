@@ -30,3 +30,25 @@ describe('creative draft card', () => {
     expect(creativeFromDraftAnswer(draft, { headline: 'x'.repeat(301) })).toMatchObject({ ok: false });
   });
 });
+
+describe('plan card', () => {
+  const planParams = {
+    ...params,
+    targeting: { communities: ['UKhiking'], geolocations: ['GB'] },
+    plan: { platform: 'reddit', successMetric: 'clicks', successTarget: 200, durationDays: 14, reasons: { successMetric: 'chose clicks because no signup form' } },
+  };
+  it('keeps proposed targeting and plan; operator can override communities and the metric', async () => {
+    const { planFromDraftAnswer } = await import('./creative-draft.js');
+    const draft = draftFromParameters(planParams)!;
+    expect(draft.plan).toMatchObject({ successMetric: 'clicks', successTarget: 200, durationDays: 14 });
+    expect(planFromDraftAnswer(draft, undefined)).toMatchObject({ ok: true, edited: false, targeting: planParams.targeting, plan: { successMetric: 'clicks' } });
+    expect(planFromDraftAnswer(draft, { communities: 'r/hiking, CampingGear', successMetric: 'ctr', successTarget: '1.5' })).toMatchObject({
+      ok: true,
+      edited: true,
+      targeting: { communities: ['hiking', 'CampingGear'], geolocations: ['GB'] },
+      plan: { successMetric: 'ctr', successTarget: 1.5, durationDays: 14 },
+    });
+    expect(planFromDraftAnswer(draft, { communities: 't5_x!' }).ok).toBe(false);
+    expect(planFromDraftAnswer(draft, { successMetric: 'vibes' }).ok).toBe(false);
+  });
+});
