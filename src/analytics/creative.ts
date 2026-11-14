@@ -61,5 +61,15 @@ export function parseApprovedTargeting(raw: unknown): { ok: true; targeting?: Re
   if (raw === undefined || raw === null) return { ok: true };
   if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'targeting must be an object' };
   if (JSON.stringify(raw).length > 20_000) return { ok: false, error: 'targeting is too large' };
-  return { ok: true, targeting: raw as Record<string, unknown> };
+  const targeting = { ...(raw as Record<string, unknown>) };
+  // The web post form historically sent `subreddits`; Ads (official Create Ad Group) only accepts
+  // `communities` (subreddit names, strict schema), so a saved `subreddits` list made create fail.
+  if ('subreddits' in targeting) {
+    const subs = targeting.subreddits;
+    delete targeting.subreddits;
+    if (!Array.isArray(subs) || subs.some((s) => typeof s !== 'string')) return { ok: false, error: 'targeting.subreddits must be names' };
+    const names = (subs as string[]).map((s) => s.trim().replace(/^\/?r\//i, '')).filter(Boolean);
+    if (names.length > 0 && targeting.communities === undefined) targeting.communities = names;
+  }
+  return { ok: true, targeting };
 }

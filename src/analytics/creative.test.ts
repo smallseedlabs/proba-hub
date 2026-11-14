@@ -19,4 +19,10 @@ describe('approved creative', () => {
     expect(parseApprovedTargeting(undefined)).toEqual({ ok: true });
     expect(parseApprovedTargeting(['x']).ok).toBe(false);
   });
+
+  it('maps the legacy subreddits key to Ads communities (names, r/ prefix dropped)', () => {
+    expect(parseApprovedTargeting({ subreddits: ['r/UKhiking', 'hiking', ' '] })).toEqual({ ok: true, targeting: { communities: ['UKhiking', 'hiking'] } });
+    expect(parseApprovedTargeting({ subreddits: ['a'], communities: ['b'] })).toEqual({ ok: true, targeting: { communities: ['b'] } });
+    expect(parseApprovedTargeting({ subreddits: [1] }).ok).toBe(false);
+  });
 });
