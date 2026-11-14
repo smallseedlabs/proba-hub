@@ -302,6 +302,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Manual override: cancel one specific platform campaign (pauses provider campaign, rejects its pending proposals, disables its reviews).
+  fastify.post<{ Params: { campaignId: string } }>(
+    '/campaigns/:campaignId/cancel',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { campaignId: { type: 'string', minLength: 1 } } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.cancelSingleCampaign(request.user!.id, request.params.campaignId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Operator-approved creative/targeting for Reddit post creation on a goal.
   fastify.get<{ Params: { goalId: string } }>(
     '/goals/:goalId/creative',

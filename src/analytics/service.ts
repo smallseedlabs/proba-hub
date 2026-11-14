@@ -1354,6 +1354,49 @@ export class AnalyticsService {
   }
 
   /**
+   * Manual override: cancel a single platform campaign owned by `userId`.
+   * Pauses the provider campaign, rejects its pending proposals, and stops its scheduled reviews,
+   * leaving any other platform campaigns under the same goal untouched.
+   */
+  async cancelSingleCampaign(
+    userId: string,
+    probaCampaignId: string
+  ): Promise<{ probaCampaignId: string; paused: number; failed: number; proposalsCancelled: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3`,
+        [this.workspaceId, userId, probaCampaignId]
+      )
+    ).rows.map(campaignRow);
+    if (campaigns.length === 0) {
+      throw Object.assign(new Error('campaign not found'), { statusCode: 404, code: 'campaign_not_found' });
+    }
+    const live = campaigns.filter((c) => Boolean(c.providerCampaignId));
+    const { paused, failed } = await this.pauseCampaignList(userId, live, 'manual_platform_pause');
+
+    await pool.query(
+      `UPDATE analytics_campaigns
+       SET review_enabled = false, next_review_at = NULL, updated_at = now()
+       WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3`,
+      [this.workspaceId, userId, probaCampaignId]
+    );
+
+    const propRes = await pool.query(
+      `UPDATE analytics_proposals
+       SET status = 'rejected', decided_at = now()
+       WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3 AND status = 'pending'`,
+      [this.workspaceId, userId, probaCampaignId]
+    );
+
+    return {
+      probaCampaignId,
+      paused,
+      failed,
+      proposalsCancelled: propRes.rowCount ?? 0,
+    };
+  }
+
+  /**
    * Manual override: cancel an entire goal owned by `userId`.
    * Pauses all live provider campaigns, rejects pending proposals, disables future bot reviews,
    * and marks the goal `cancelled` while preserving all historical data, metrics, and thread logs.
