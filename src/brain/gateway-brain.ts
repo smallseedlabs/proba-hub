@@ -121,10 +121,15 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       return this.outputsOrThrow(gathered);
     }
 
-    return this.outputsOrThrow(snapshot);
+    return this.outputsOrThrow(snapshot, { resumed: !!resume });
   }
 
-  private outputsOrThrow(snapshot: GatewayRunSnapshot): BrainOutput[] {
+  /**
+   * A resumed run that ends blocked/failed/ambiguous has left awaiting_approval, so bindResume
+   * will refuse the same ask next time (approval_expired): the error says so (runStatus), and
+   * Hub closes the card instead of reopening it.
+   */
+  private outputsOrThrow(snapshot: GatewayRunSnapshot, options: { resumed?: boolean } = {}): BrainOutput[] {
     if (snapshot.status === 'awaiting_approval' || snapshot.status === 'completed') {
       return outputsOf(snapshot);
     }
@@ -134,7 +139,8 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
         snapshot.error?.message ?? `gateway run ${snapshot.status}`,
         undefined,
         snapshot.error?.retryable ?? snapshot.status === 'blocked',
-        snapshot.status
+        snapshot.status,
+        options.resumed === true
       );
     }
     if (snapshot.status === 'cancelled' || snapshot.status === 'paused' || snapshot.status === 'stopped') {

@@ -466,4 +466,32 @@ describe('GatewayBrain', () => {
       runStatus: 'failed',
     });
   });
+
+  it('flags a blocked resume as consuming the ask (the run left awaiting_approval)', async () => {
+    const firstId = randomUUID();
+    const store = new MemoryGatewayRunStore();
+    const client = fakeClient((req) =>
+      req.resume
+        ? {
+            runId: firstId,
+            status: 'blocked',
+            iteration: 2,
+            error: { code: 'preflight_blocked', message: 'context build failed', retryable: true },
+          }
+        : awaiting(firstId, askId)
+    );
+    await makeBrain(client, { store }).process(command('send_message', { text: 'pause it' }), context());
+    await expect(
+      makeBrain(client, { store }).process(command('answer_ask', { askId, choice: 'approve', askType: 'action_approval' }), context())
+    ).rejects.toMatchObject({ code: 'preflight_blocked', runStatus: 'blocked', askConsumed: true });
+    const blockedFresh = fakeClient(() => ({
+      runId: randomUUID(),
+      status: 'blocked',
+      iteration: 0,
+      error: { code: 'preflight_blocked', message: 'x', retryable: true },
+    }));
+    await expect(makeBrain(blockedFresh).process(command('send_message', { text: 'go' }), context())).rejects.toMatchObject({
+      askConsumed: false,
+    });
+  });
 });

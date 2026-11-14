@@ -26,7 +26,7 @@ describe('brainFailureMessage', () => {
       answeringAsk: true,
       askClosed: true,
     });
-    expect(msg).toMatch(/This request is closed because the run behind it has ended/);
+    expect(msg).toMatch(/This request is closed because the run behind it can no longer continue from it/);
     expect(msg).not.toMatch(/card is still open/);
   });
 });
@@ -41,6 +41,7 @@ describe('isTerminalBrainFailure', () => {
 
   it('is false for blocked runs, transport failures and non-gateway errors', () => {
     expect(isTerminalBrainFailure(new GatewayClientError('preflight_blocked', 'x', undefined, true, 'blocked'))).toBe(false);
+    expect(isTerminalBrainFailure(new GatewayClientError('preflight_blocked', 'x', undefined, true, 'blocked', true))).toBe(true);
     expect(isTerminalBrainFailure(new GatewayClientError('timeout', 'x', undefined, true))).toBe(false);
     expect(isTerminalBrainFailure(new GatewayClientError('idempotency_conflict', 'x', 409))).toBe(false);
     expect(isTerminalBrainFailure(new Error('boom'))).toBe(false);

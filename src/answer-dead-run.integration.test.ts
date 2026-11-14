@@ -106,6 +106,19 @@ describe('an answer whose gateway run has ended closes the card instead of reope
     expect(await askStatus(askId)).toBe('expired');
   });
 
+  it('a resume that leaves the run blocked (approval already used) closes the card', async () => {
+    const app = await appPromise;
+    const user = await createTestUser(app, 'blocked-resume');
+    const askId = await openAsk(app, user, 'action_approval');
+    failure = () =>
+      new GatewayClientError('preflight_blocked', 'context build failed: Context bridge returned HTTP 401', undefined, true, 'blocked', true);
+    await send(app, user, 'answer_ask', { askId, choice: 'approve' }, 'failed');
+    const events = await waitForEvents(app, user.token, (evs) => evs.some((e) => e.type === 'error'));
+    expect(events.some((e) => e.type === 'ask_resolved' && e.payload.resolution === 'expired')).toBe(true);
+    expect(events.find((e) => e.type === 'error').payload).toMatchObject({ askId, retryable: false });
+    expect(await askStatus(askId)).toBe('expired');
+  });
+
   it('a retryable failure keeps the ask pending, marks the command failed, and is retryable', async () => {
     const app = await appPromise;
     const user = await createTestUser(app, 'live-run-retry');

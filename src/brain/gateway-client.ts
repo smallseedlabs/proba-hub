@@ -78,14 +78,17 @@ export class GatewayClientError extends Error {
   readonly retryable: boolean;
   /** Gateway run status when the error came from a finished run snapshot (e.g. failed). */
   readonly runStatus?: string;
+  /** The error ended an approval resume: the run is no longer awaiting that ask. */
+  readonly askConsumed: boolean;
 
-  constructor(code: string, message: string, status?: number, retryable = false, runStatus?: string) {
+  constructor(code: string, message: string, status?: number, retryable = false, runStatus?: string, askConsumed = false) {
     super(message);
     this.name = 'GatewayClientError';
     this.code = code;
     this.status = status;
     this.retryable = retryable;
     this.runStatus = runStatus;
+    this.askConsumed = askConsumed;
   }
 }
 

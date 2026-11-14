@@ -2028,7 +2028,7 @@ export function brainFailureMessage(
   options: { answeringAsk?: boolean; askClosed?: boolean } = {}
 ): string {
   const retry = options.askClosed
-    ? ' This request is closed because the run behind it has ended; nothing more will run from it.'
+    ? ' This request is closed because the run behind it can no longer continue from it; nothing more will run from it.'
     : options.answeringAsk
       ? ' Your answer was not recorded; the card is still open, so you can answer it again.'
       : ' Please try again.';
@@ -2068,11 +2068,13 @@ const DEAD_RUN_STATUSES = new Set(['failed', 'ambiguous', 'cancelled', 'stopped'
 
 /**
  * True when answering the same ask again cannot succeed: the gateway no longer holds the
- * approval, or the run behind it finished in a failed/ambiguous state. A blocked run, a
- * timeout or an unreachable gateway stays retryable.
+ * approval, the run behind it finished failed/ambiguous, or the resume itself moved the run
+ * out of awaiting_approval (e.g. blocked after the approval was used; the Hub only resumes an
+ * awaiting run). A timeout or an unreachable gateway stays retryable.
  */
 export function isTerminalBrainFailure(cause: unknown): boolean {
   if (!(cause instanceof GatewayClientError)) return false;
   if (cause.code === 'approval_expired' || cause.code === 'approval_mismatch') return true;
+  if (cause.askConsumed && cause.runStatus !== undefined && cause.runStatus !== 'awaiting_approval') return true;
   return cause.runStatus !== undefined && DEAD_RUN_STATUSES.has(cause.runStatus);
 }
