@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { brainFailureMessage, isTerminalBrainFailure } from './command-processor.js';
+import { brainFailureMessage, isTerminalBrainFailure } from './brain-failure.js';
 import { GatewayClientError } from '../brain/gateway-client.js';
 
 describe('brainFailureMessage', () => {
