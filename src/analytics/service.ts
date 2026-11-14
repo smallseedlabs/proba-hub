@@ -1404,7 +1404,7 @@ export class AnalyticsService {
   async cancelGoal(
     userId: string,
     goalId: string
-  ): Promise<{ goalId: string; status: 'cancelled'; paused: number; failed: number; proposalsCancelled: number }> {
+  ): Promise<{ goalId: string; status: 'cancelled' | 'inactive'; paused: number; failed: number; proposalsCancelled: number }> {
     const goalRes = await pool.query(
       `SELECT id, title, status, thread_id FROM goals WHERE id = $1 AND user_id = $2`,
       [goalId, userId]
@@ -1418,6 +1418,7 @@ export class AnalyticsService {
         [this.workspaceId, userId, goalId]
       )
     ).rows.map(campaignRow);
+    const nextStatus: 'cancelled' | 'inactive' = campaigns.length === 0 ? 'inactive' : 'cancelled';
     const liveCampaigns = campaigns.filter((c) => Boolean(c.providerCampaignId));
     const { paused, failed } = await this.pauseCampaignList(userId, liveCampaigns, 'manual_goal_pause');
 
@@ -1441,8 +1442,8 @@ export class AnalyticsService {
     }
 
     await pool.query(
-      `UPDATE goals SET status = 'cancelled', updated_at = now() WHERE id = $1 AND user_id = $2`,
-      [goalId, userId]
+      `UPDATE goals SET status = $3, updated_at = now() WHERE id = $1 AND user_id = $2`,
+      [goalId, userId, nextStatus]
     );
 
     await this.options.audit.emit(
@@ -1458,7 +1459,7 @@ export class AnalyticsService {
         details: {
           goalId,
           from: goal.status,
-          to: 'cancelled',
+          to: nextStatus,
           paused,
           failed,
           proposalsCancelled,
@@ -1468,7 +1469,7 @@ export class AnalyticsService {
       { bestEffort: true }
     );
 
-    return { goalId, status: 'cancelled', paused, failed, proposalsCancelled };
+    return { goalId, status: nextStatus, paused, failed, proposalsCancelled };
   }
 
   private async pauseCampaignList(
