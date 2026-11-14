@@ -64,6 +64,8 @@ export class FakeAnalyticsGatewayClient implements GatewayClient {
   /** Clock shared with the Hub service under test. */
   now: () => Date = () => new Date();
   private latest = new Map<string, FakeDecision>();
+  /** FAKE brain reviewer notes per campaign (reviewIntent=brain); the fake does NOT clamp, Hub must. */
+  brainNotes = new Map<string, Record<string, unknown>>();
 
   async createRun(request: GatewayRunRequest): Promise<GatewayRunSnapshot> {
     this.calls.push(structuredClone(request));
@@ -83,7 +85,18 @@ export class FakeAnalyticsGatewayClient implements GatewayClient {
     const metrics = this.metrics.get(probaCampaignId) ?? [];
     const until = new Date(this.now().getTime() + this.reviewWindowMs).toISOString();
     let proposal: Record<string, unknown> | null = null;
-    if (intent === 'propose_pause' || intent === 'propose_cap') {
+    const note = intent === 'brain' ? this.brainNotes.get(probaCampaignId) : undefined;
+    const change = note ? rec(note.change) : {};
+    if (note && (change.action === 'pause' || change.action === 'lower_budget')) {
+      const verb = change.action === 'pause' ? 'ads.pause_campaign' : 'ads.update_campaign';
+      const args =
+        change.action === 'pause'
+          ? { probaCampaignId }
+          : { probaCampaignId, dailyBudget: change.dailyBudget, ...(payload.currency ? { currency: payload.currency } : {}) };
+      const argsHash = hash(args);
+      proposal = { verb, args, argsHash, grantsSpend: false, dryRun: true };
+      this.latest.set(probaCampaignId, { decisionId, probaCampaignId, verb, args, argsHash });
+    } else if (intent === 'propose_pause' || intent === 'propose_cap') {
       const verb = intent === 'propose_pause' ? 'ads.pause_campaign' : 'ads.update_campaign';
       const args =
         intent === 'propose_pause'
@@ -111,6 +124,14 @@ export class FakeAnalyticsGatewayClient implements GatewayClient {
         unknownMetrics: metrics.some((m) => Object.values(m).includes('unknown')),
         metrics,
         proposal,
+        ...(note
+          ? {
+              review: {
+                ...note,
+                nextCheckAt: new Date(this.now().getTime() + Number(note.nextCheckInHours ?? 24) * 3_600_000).toISOString(),
+              },
+            }
+          : {}),
       },
     };
   }
