@@ -84,6 +84,13 @@ export async function createRuntimeBrain(options: CreateBrainOptions = {}): Prom
     budget: {
       maxCompletionTokens: config.brain.limits.maxOutputTokens,
     },
+    getConnectedPlatforms: async (workspaceId) => {
+      const { rows } = await pool.query<{ provider: string }>(
+        `SELECT DISTINCT provider FROM platform_connections WHERE workspace_id = $1::varchar AND status = 'connected' ORDER BY provider`,
+        [workspaceId]
+      );
+      return rows.map((r) => r.provider);
+    },
     onCampaignCreated: async ({ workspaceId, userId, goalId, threadId, outcome }) => {
       const probaCampaignId = typeof outcome.probaCampaignId === 'string' ? outcome.probaCampaignId : undefined;
       if (!probaCampaignId || !goalId || !threadId) return;

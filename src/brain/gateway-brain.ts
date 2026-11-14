@@ -50,6 +50,7 @@ export interface GatewayBrainOptions {
   store: GatewayRunStore;
   audit?: GatewayBrainAudit;
   budget?: Record<string, unknown>;
+  getConnectedPlatforms?: (workspaceId: string) => Promise<string[]>;
   onCampaignCreated?: (info: {
     workspaceId: string;
     userId: string;
@@ -91,7 +92,7 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       ? resume
         ? withCurrentOperatorScope(pending.request, context.userSuppliedInput)
         : pending.request
-      : this.buildRequest(command, context, { workspaceId, userId, threadId, goalId });
+      : await this.buildRequest(command, context, { workspaceId, userId, threadId, goalId });
     const request: GatewayRunRequest = {
       ...durableGatewayRequest(base),
       ...(resume ? { resume } : {}),
@@ -312,15 +313,22 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
     );
   }
 
-  private buildRequest(
+  private async buildRequest(
     command: CommandEnvelope,
     context: BrainContext,
     ids: { workspaceId: string; userId: string; threadId?: string; goalId?: string }
-  ): GatewayRunRequest {
+  ): Promise<GatewayRunRequest> {
     const stepType = (context.stepType ?? mapCommandToStepType(command)) as StepType;
     const stepId = context.stepId ?? randomUUID();
     const traceId = currentTrace()?.traceId ?? command.clientMsgId;
-    const userSuppliedInput = context.userSuppliedInput ?? userSuppliedInputFromCommand(command);
+    const rawUserSuppliedInput = context.userSuppliedInput ?? userSuppliedInputFromCommand(command);
+    const connectedPlatforms = this.options.getConnectedPlatforms
+      ? await this.options.getConnectedPlatforms(ids.workspaceId).catch(() => [])
+      : [];
+    const userSuppliedInput =
+      rawUserSuppliedInput && connectedPlatforms.length > 0
+        ? { ...rawUserSuppliedInput, connectedPlatforms }
+        : rawUserSuppliedInput;
     return {
       traceId,
       workspaceId: ids.workspaceId,

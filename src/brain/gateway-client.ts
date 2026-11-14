@@ -50,6 +50,8 @@ export interface GatewayRunRequest {
     creative?: ApprovedCreative;
     /** Operator-approved targeting (Ads validates the Reddit shape). */
     targeting?: Record<string, unknown>;
+    /** Connected ad platforms in this workspace (e.g. ['reddit', 'meta']). */
+    connectedPlatforms?: string[];
   };
   resume?: {
     askId: string;
