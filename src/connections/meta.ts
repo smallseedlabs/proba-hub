@@ -117,7 +117,7 @@ export class MetaConnectionAdapter implements ConnectionProviderAdapter {
   }
 
   async listAccounts(accessToken: string): Promise<ProviderAccount[]> {
-    const url = `${this.graphBase}/me/adaccounts?fields=id,account_id,name,currency,account_status,business{id,name}&limit=200`;
+    const url = `${this.graphBase}/me/adaccounts?fields=id,account_id,name,currency,account_status&limit=200`;
     const res = await this.send(url, {
       method: 'GET',
       headers: {
