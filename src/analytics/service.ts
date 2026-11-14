@@ -1376,7 +1376,7 @@ export class AnalyticsService {
 
     await pool.query(
       `UPDATE analytics_campaigns
-       SET review_enabled = false, next_review_at = NULL, updated_at = now()
+       SET review_enabled = false, updated_at = now()
        WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3`,
       [this.workspaceId, userId, probaCampaignId]
     );
@@ -1424,7 +1424,7 @@ export class AnalyticsService {
 
     await pool.query(
       `UPDATE analytics_campaigns
-       SET review_enabled = false, next_review_at = NULL, updated_at = now()
+       SET review_enabled = false, updated_at = now()
        WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3`,
       [this.workspaceId, userId, goalId]
     );
