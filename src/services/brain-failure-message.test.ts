@@ -1,11 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { brainFailureMessage, isTerminalBrainFailure } from './brain-failure.js';
+import { brainFailureEventExtra, brainFailureMessage, isTerminalBrainFailure } from './brain-failure.js';
 import { GatewayClientError } from '../brain/gateway-client.js';
 
 describe('brainFailureMessage', () => {
-  it('keeps the preflight reason', () => {
+  it('turns a billing preflight block into a funded-wallet retry instruction', () => {
+    expect(
+      brainFailureMessage(
+        new GatewayClientError(
+          'preflight_blocked',
+          'authoritative Ads domain reported the workspace is not billing-eligible',
+          undefined,
+          true,
+          'blocked',
+          true
+        )
+      )
+    ).toBe(
+      'Campaign creation is blocked because your Reddit Ads wallet is not funded. Add funds to your Reddit Ads wallet, then press Retry. Nothing was spent.'
+    );
+  });
+
+  it('keeps a gateway-authored blocked reply that already says how to retry', () => {
+    const text =
+      'Campaign creation is blocked because your Reddit Ads wallet is not funded. Add funds to your Reddit Ads wallet, then press Retry. Nothing was spent.';
+    expect(brainFailureMessage(new GatewayClientError('preflight_blocked', text, undefined, true))).toBe(text);
+  });
+
+  it('explains other preflight blocks without repeating the raw reason as a question', () => {
     expect(brainFailureMessage(new GatewayClientError('preflight_blocked', 'llm.quota unknown'))).toBe(
-      'Proba could not start this step (nothing was spent): llm.quota unknown'
+      'This step is blocked: llm.quota unknown. Fix that, then press Retry. Nothing was spent.'
     );
   });
 
@@ -45,5 +68,23 @@ describe('isTerminalBrainFailure', () => {
     expect(isTerminalBrainFailure(new GatewayClientError('timeout', 'x', undefined, true))).toBe(false);
     expect(isTerminalBrainFailure(new GatewayClientError('idempotency_conflict', 'x', 409))).toBe(false);
     expect(isTerminalBrainFailure(new Error('boom'))).toBe(false);
+  });
+});
+
+describe('brainFailureEventExtra', () => {
+  it('keeps retryable false on a consumed ask so the card stays closed, and offers a new Retry action', () => {
+    const extra = brainFailureEventExtra(
+      new GatewayClientError('preflight_blocked', 'not billing-eligible', undefined, true, 'blocked', true),
+      { askId: 'ask-1', askClosed: true }
+    );
+    expect(extra).toEqual({ askId: 'ask-1', retryable: false, retryAction: true, blocked: true });
+  });
+
+  it('leaves a still-open ask retryable without a separate Retry action', () => {
+    const extra = brainFailureEventExtra(new GatewayClientError('timeout', 'x', undefined, true), {
+      askId: 'ask-1',
+      askClosed: false,
+    });
+    expect(extra).toEqual({ askId: 'ask-1', retryable: true });
   });
 });
