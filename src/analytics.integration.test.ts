@@ -333,7 +333,7 @@ describe('Hub approved creative forwarding (FAKE research gateway, real Postgres
     expect(fake.calls.at(-1)?.userSuppliedInput).toEqual({
       landingPageUrl: landing,
       creative: CREATIVE,
-      targeting: { subreddits: ['r/example'] },
+      targeting: { communities: ['example'] },
     });
   });
 });
