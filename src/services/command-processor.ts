@@ -27,6 +27,8 @@ import {
 } from '@smallseedlabs/proba-protocol';
 import { researchReviewFromBrainOutput } from '../brain/research-snapshot.js';
 import { parseApprovedCreative, parseApprovedTargeting } from '../analytics/creative.js';
+import type { ApprovedCreative } from '../brain/gateway-client.js';
+import { CREATIVE_DRAFT_VERB, creativeFromDraftAnswer, draftFromParameters, type CreativeDraft } from '../analytics/creative-draft.js';
 import {
   userSuppliedInputFromCommand,
   userSuppliedInputFromCreateGoal,
@@ -116,6 +118,54 @@ function summarizeOutput(output: unknown): Record<string, unknown> {
 function clarificationText(output: { reason?: string; questions: Array<{ text: string }> }): string {
   const lines = output.questions.map((q, i) => `${i + 1}. ${q.text}`);
   return [output.reason, ...lines].filter((l): l is string => typeof l === 'string' && l.length > 0).join('\n');
+}
+
+interface DraftAskEnvelope {
+  payload: Record<string, unknown>;
+  ui?: { component: string; version: string; props: Record<string, unknown> };
+  fallbackText?: string;
+}
+
+/** Turn the generic tool approval card into an editable post-draft card (web renders props.creativeDraft). */
+function decorateCreativeDraftAsk(envelope: DraftAskEnvelope, draft: CreativeDraft): void {
+  const title = 'Review the Reddit post Proba drafted';
+  const description = 'Approve to save it as this goal’s post copy, or edit it first. Nothing is posted or spent from this card.';
+  envelope.payload.title = title;
+  envelope.payload.description = description;
+  envelope.payload.questions = [
+    {
+      id: 'approval',
+      type: 'choice',
+      label: 'Post copy',
+      required: true,
+      options: [
+        { value: 'approve', label: 'Approve copy' },
+        { value: 'reject', label: 'Reject' },
+      ],
+    },
+  ];
+  if (envelope.ui) {
+    envelope.ui = {
+      component: 'approval_card',
+      version: envelope.ui.version,
+      props: {
+        title,
+        description,
+        action: 'Save post copy',
+        risk: envelope.ui.props.risk,
+        confirmLabel: 'Approve copy',
+        creativeDraft: {
+          type: draft.type,
+          headline: draft.headline,
+          body: draft.body,
+          ...(draft.rationale ? { rationale: draft.rationale } : {}),
+          claims: draft.claims,
+          landingPageUrl: draft.landingPageUrl,
+        },
+      },
+    };
+  }
+  envelope.fallbackText = `${title}: ${draft.headline}`;
 }
 
 export interface CommandProcessorOptions {
@@ -427,9 +477,26 @@ export class CommandProcessor {
         }
       }
 
+      // A brain-drafted post card: the operator's approve (with optional edits) is what saves the copy.
+      const creativeAnswer =
+        resolvedAskType === 'action_approval'
+          ? await this.creativeDraftAnswer(client, envelope.threadId!, answerPayload)
+          : undefined;
+      if (creativeAnswer && !creativeAnswer.ok) {
+        const event = await this.createErrorEvent(client, userId, envelope.threadId, 'invalid_creative', creativeAnswer.error);
+        events.push(event);
+        await this.auditAskAnswered(client, scope, answerPayload, resolvedAskType, 'denied');
+        await client.query('UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2', ['processed', command.id]);
+        await this.auditProcessed(client, scope, startedAt, events, 'denied', 'invalid_creative');
+        return { command, events };
+      }
+
       // If the brain step behind this answer fails, the answer is undone so the
       // ask stays pending and the card can be answered again.
       await client.query('SAVEPOINT answer_ask');
+      if (creativeAnswer?.ok && creativeAnswer.creative) {
+        await this.saveDraftedCreative(client, scope, envelope.threadId!, String(answerPayload.askId), creativeAnswer.creative, creativeAnswer.edited);
+      }
       const askResolvedEvent = await this.handleAskAnswer(client, userId, envelope.threadId!, answerPayload);
       events.push(askResolvedEvent);
       await this.auditAskAnswered(client, scope, answerPayload, resolvedAskType);
@@ -1255,6 +1322,15 @@ export class CommandProcessor {
     const eventEnvelope = mapBrainOutputToEvent(output, { seq, threadId });
     const boundAskId = askIdFromBrainOutput(output);
     if (boundAskId) applyBoundAskId(eventEnvelope, boundAskId);
+    let creativeDraft: CreativeDraft | undefined;
+    if (output.type === 'tool_call' && output.tool === CREATIVE_DRAFT_VERB && eventEnvelope.type === 'ask') {
+      creativeDraft = draftFromParameters(output.parameters);
+      if (!creativeDraft) throw new Error('creative.draft_post output is not a checked draft');
+      if (expectedLandingPageUrl && creativeDraft.landingPageUrl !== expectedLandingPageUrl) {
+        throw new Error('creative.draft_post landing URL does not match the operator-entered URL');
+      }
+      decorateCreativeDraftAsk(eventEnvelope as unknown as DraftAskEnvelope, creativeDraft);
+    }
     
     let uiPayloadId: string | undefined;
     if ('ui' in eventEnvelope && eventEnvelope.ui) {
@@ -1288,7 +1364,7 @@ export class CommandProcessor {
     );
 
     if (eventEnvelope.type === 'ask') {
-      await this.createAsk(client, threadId!, eventEnvelope.payload as Record<string, unknown>);
+      await this.createAsk(client, threadId!, eventEnvelope.payload as Record<string, unknown>, creativeDraft);
     }
 
     if (eventEnvelope.type === 'message') {
@@ -1382,11 +1458,12 @@ export class CommandProcessor {
   private async createAsk(
     client: PoolClient,
     threadId: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    creativeDraft?: CreativeDraft
   ): Promise<void> {
     await client.query(
-      `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions, research, on_expire)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO asks (id, thread_id, ask_type, title, description, blocking, risk, cost_effect, questions, research, on_expire, creative_draft)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         payload.askId,
         threadId,
@@ -1399,6 +1476,7 @@ export class CommandProcessor {
         toJsonb(payload.questions),
         toJsonb(payload.research ?? null),
         payload.onExpire ?? null,
+        creativeDraft ? toJsonb(creativeDraft) : null,
       ]
     );
 
@@ -1505,6 +1583,69 @@ export class CommandProcessor {
       }
     }
     return { blocked: false };
+  }
+
+  /**
+   * When the answered ask is a brain-drafted post card: on approve, the creative to save (the operator's
+   * edited headline/body from `values`, else the draft as shown). Undefined for any other ask; ok:false when
+   * the edited copy is invalid (the ask stays pending).
+   */
+  private async creativeDraftAnswer(
+    client: PoolClient,
+    threadId: string,
+    payload: AnswerAskPayload
+  ): Promise<{ ok: true; creative?: ApprovedCreative; edited: boolean } | { ok: false; error: string } | undefined> {
+    if (typeof payload.askId !== 'string' || !UUID_RE.test(payload.askId)) return undefined;
+    const row = (
+      await client.query<{ creativeDraft: unknown; status: string }>(
+        'SELECT creative_draft as "creativeDraft", status FROM asks WHERE id = $1 AND thread_id = $2',
+        [payload.askId, threadId]
+      )
+    ).rows[0];
+    if (!row?.creativeDraft || row.status !== 'pending') return undefined;
+    const draft = draftFromParameters(row.creativeDraft);
+    if (!draft) return { ok: false, error: 'The stored post draft is not valid; ask Proba to draft it again.' };
+    if (payload.choice !== 'approve') return { ok: true, edited: false };
+    const values = payload.values && typeof payload.values === 'object' ? (payload.values as Record<string, unknown>) : undefined;
+    const result = creativeFromDraftAnswer(draft, values);
+    if (!result.ok) return { ok: false, error: `Post copy not saved: ${result.error}` };
+    return result;
+  }
+
+  /** Save an approved draft as the goal creative (same column the Campaigns post form writes), audited without the copy. */
+  private async saveDraftedCreative(
+    client: PoolClient,
+    scope: AuditScope,
+    threadId: string,
+    askId: string,
+    creative: ApprovedCreative,
+    edited: boolean
+  ): Promise<void> {
+    const updated = await client.query<{ id: string }>(
+      `UPDATE goals SET approved_creative = $1, creative_approved_at = NOW(), updated_at = NOW()
+       WHERE id = (SELECT id FROM goals WHERE thread_id = $2 AND user_id = $3 ORDER BY created_at DESC LIMIT 1)
+       RETURNING id`,
+      [toJsonb(creative), threadId, scope.userId]
+    );
+    const goalId = updated.rows[0]?.id;
+    await getAudit().emit(
+      {
+        action: 'goal.updated',
+        outcome: goalId ? 'success' : 'failure',
+        userId: scope.userId,
+        threadId,
+        ...(goalId ? { goalId } : {}),
+        target: { type: 'ask', id: askId.slice(0, 128) },
+        details: {
+          change: 'creative_approved',
+          source: 'brain_draft',
+          edited,
+          creativeType: creative.type,
+          headlineLength: creative.headline.length,
+        },
+      },
+      { tx: client }
+    );
   }
 
   private async handleAskAnswer(

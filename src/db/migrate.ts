@@ -27,6 +27,7 @@ export const migrations: Migration[] = [
   { id: 8, name: 'analytics_actions', file: '008_analytics_actions.sql' },
   { id: 9, name: 'platform_connections', file: '009_platform_connections.sql' },
   { id: 10, name: 'goal_reservations', file: '010_goal_reservations.sql' },
+  { id: 11, name: 'ask_creative_draft', file: '011_ask_creative_draft.sql' },
 ];
 
 async function ensureMigrationsTable(): Promise<void> {
