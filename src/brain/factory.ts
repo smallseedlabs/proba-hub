@@ -98,8 +98,8 @@ export async function createRuntimeBrain(options: CreateBrainOptions = {}): Prom
            (workspace_id, user_id, proba_campaign_id, goal_id, thread_id, platform, account_id,
             provider_campaign_id, current_daily_budget, currency, rules)
          VALUES (
-           $1,$2,$3,$4,$5,$6::varchar,
-           COALESCE($7::varchar, (SELECT provider_account_id FROM platform_connections WHERE workspace_id = $1 AND provider = $6::varchar LIMIT 1)),
+           $1::text,$2,$3,$4,$5,$6::varchar,
+           COALESCE($7::varchar, (SELECT provider_account_id FROM platform_connections WHERE workspace_id = $1::text AND provider = $6::varchar LIMIT 1)),
            $8,$9,$10,'{}'::jsonb
          )
          ON CONFLICT (workspace_id, user_id, proba_campaign_id) DO UPDATE SET
