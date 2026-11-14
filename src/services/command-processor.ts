@@ -187,10 +187,13 @@ export interface CommandProcessorOptions {
   maxNeedRounds?: number;
   /** Override failure mode (tests). */
   onFailure?: ContextBridgeRuntime['onFailure'];
+  /** Called after `control: kill` to pause all live provider campaigns & ads for the user. */
+  onEmergencyStop?: (userId: string) => Promise<unknown>;
 }
 
 export class CommandProcessor {
   private readonly bridge: ContextBridgeRuntime | null;
+  private readonly onEmergencyStop?: (userId: string) => Promise<unknown>;
   /** Last packet attached to a brain step in this process (for tests / step linkage). */
   lastAttachedPacket: ContextPacket | null = null;
   lastAttachedStep: { stepId: string; stepType: string; packetId: string; packetHash: string } | null =
@@ -200,6 +203,7 @@ export class CommandProcessor {
     private brain: BrainPort,
     options: CommandProcessorOptions = {}
   ) {
+    this.onEmergencyStop = options.onEmergencyStop;
     if (options.contextClient === undefined) {
       this.bridge = null;
     } else {
@@ -2037,6 +2041,17 @@ export class CommandProcessor {
         logger.warn(
           { err: error instanceof Error ? error.name : 'error', userId, action: payload.action },
           'gateway cancel after Hub control failed; Hub execution state already persisted'
+        );
+      }
+    }
+
+    if (payload.action === 'kill' && this.onEmergencyStop) {
+      try {
+        await this.onEmergencyStop(userId);
+      } catch (error) {
+        logger.warn(
+          { err: error instanceof Error ? error.message : 'error', userId },
+          'emergency stop campaign pause failed; Hub execution state already persisted'
         );
       }
     }

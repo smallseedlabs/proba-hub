@@ -15,6 +15,7 @@ import { startAskExpiryJob, stopAskExpiryJob } from './services/ask-expiry.js';
 import { CommandProcessor } from './services/command-processor.js';
 import { createGatewayRuntime, createRuntimeBrain } from './brain/factory.js';
 import { AnalyticsService } from './analytics/service.js';
+import { HubCampaignDeliveryResolver } from './analytics/delivery.js';
 import { startAnalyticsScheduler, stopAnalyticsScheduler } from './analytics/scheduler.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { brokerRoutes, connectionRoutes } from './routes/connections.js';
@@ -104,9 +105,34 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       openMs: config.contextBridge.openMs,
     });
 
+  const connections = options.connections !== undefined ? options.connections : await createConnectionsRuntime();
+
+  let analytics = options.analytics;
+  if (analytics === undefined) {
+    const runtime = await createGatewayRuntime();
+    analytics = runtime
+      ? new AnalyticsService({
+          client: runtime.client,
+          serviceTokens: runtime.serviceTokens,
+          assertions: runtime.assertions,
+          workspaceId: config.audit.workspaceId,
+          tokenTtlSeconds: config.gateway.tokenTtlSeconds,
+          cadenceMs: config.analytics.cadenceMs,
+          reviewer: config.analytics.reviewer,
+          reviewBounds: config.analytics.reviewBounds,
+          delivery: new HubCampaignDeliveryResolver({
+            connections: connections?.service ?? null,
+            redditAdsApiBaseUrl: config.connections.reddit.adsApiBaseUrl,
+          }),
+          audit: getAudit(),
+        })
+      : null;
+  }
+
   const processor = new CommandProcessor(brain, {
     contextClient,
     assertionMinter: assertionAuth.minter,
+    onEmergencyStop: analytics ? (uid) => analytics!.emergencyPauseAll(uid) : undefined,
     ...(options.contextBridgeEnabled !== undefined
       ? { contextBridgeEnabled: options.contextBridgeEnabled }
       : {}),
@@ -137,26 +163,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
   await fastify.register(readRoutes, { prefix: '/v1' });
 
-  let analytics = options.analytics;
-  if (analytics === undefined) {
-    const runtime = await createGatewayRuntime();
-    analytics = runtime
-      ? new AnalyticsService({
-          client: runtime.client,
-          serviceTokens: runtime.serviceTokens,
-          assertions: runtime.assertions,
-          workspaceId: config.audit.workspaceId,
-          tokenTtlSeconds: config.gateway.tokenTtlSeconds,
-          cadenceMs: config.analytics.cadenceMs,
-          reviewer: config.analytics.reviewer,
-          reviewBounds: config.analytics.reviewBounds,
-          audit: getAudit(),
-        })
-      : null;
-  }
   await fastify.register(analyticsRoutes, { prefix: '/v1', service: analytics, workspaceId: config.audit.workspaceId });
 
-  const connections = options.connections !== undefined ? options.connections : await createConnectionsRuntime();
   await fastify.register(connectionRoutes, { prefix: '/v1', service: connections?.service ?? null });
   if (connections?.adsVerifier) {
     await fastify.register(brokerRoutes, {

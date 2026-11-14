@@ -3,6 +3,7 @@ import { loadAssertionPrivateKey } from '../auth/assertions/private-key.js';
 import { createAssertionMinter } from '../auth/assertions/mint.js';
 import { createGatewayTokenMinter } from '../auth/gateway-token.js';
 import { getAudit } from '../audit/service.js';
+import { pool } from '../db/client.js';
 import type { BrainPort } from '../types.js';
 import { MockBrain } from './mock-brain.js';
 import { DeepSeekBrain } from './deepseek-brain.js';
@@ -82,6 +83,33 @@ export async function createRuntimeBrain(options: CreateBrainOptions = {}): Prom
     audit: getAudit(),
     budget: {
       maxCompletionTokens: config.brain.limits.maxOutputTokens,
+    },
+    onCampaignCreated: async ({ workspaceId, userId, goalId, threadId, outcome }) => {
+      const probaCampaignId = typeof outcome.probaCampaignId === 'string' ? outcome.probaCampaignId : undefined;
+      if (!probaCampaignId || !goalId || !threadId) return;
+      const platform = typeof outcome.platform === 'string' ? outcome.platform : 'reddit';
+      const accountId = typeof outcome.providerAccountId === 'string' ? outcome.providerAccountId : null;
+      const providerCampaignId = typeof outcome.providerCampaignId === 'string' ? outcome.providerCampaignId : null;
+      const dailyBudget = typeof outcome.dailyBudget === 'number' && outcome.dailyBudget > 0 ? outcome.dailyBudget : null;
+      const currency =
+        typeof outcome.currency === 'string' && outcome.currency.length === 3 ? outcome.currency.toUpperCase() : null;
+      await pool.query(
+        `INSERT INTO analytics_campaigns
+           (workspace_id, user_id, proba_campaign_id, goal_id, thread_id, platform, account_id,
+            provider_campaign_id, current_daily_budget, currency, rules)
+         VALUES (
+           $1,$2,$3,$4,$5,$6::varchar,
+           COALESCE($7::varchar, (SELECT provider_account_id FROM platform_connections WHERE workspace_id = $1 AND provider = $6::varchar LIMIT 1)),
+           $8,$9,$10,'{}'::jsonb
+         )
+         ON CONFLICT (workspace_id, user_id, proba_campaign_id) DO UPDATE SET
+           account_id = COALESCE(EXCLUDED.account_id, analytics_campaigns.account_id),
+           provider_campaign_id = COALESCE(EXCLUDED.provider_campaign_id, analytics_campaigns.provider_campaign_id),
+           current_daily_budget = COALESCE(EXCLUDED.current_daily_budget, analytics_campaigns.current_daily_budget),
+           currency = COALESCE(EXCLUDED.currency, analytics_campaigns.currency),
+           updated_at = NOW()`,
+        [workspaceId, userId, probaCampaignId, goalId, threadId, platform, accountId, providerCampaignId, dailyBudget, currency]
+      );
     },
   });
 }

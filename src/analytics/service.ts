@@ -44,6 +44,7 @@ import {
   type WakeEvent,
 } from './reviewer.js';
 import { REVIEW_LOCKS } from './reviewer.js';
+import type { CampaignDeliveryResolver, CampaignDeliveryStatus } from './delivery.js';
 
 export const AD_PLATFORMS = ['reddit', 'microsoft', 'google', 'meta'] as const;
 export type AdPlatform = (typeof AD_PLATFORMS)[number];
@@ -88,10 +89,13 @@ export interface GoalStatus {
     campaigns: Array<{
       probaCampaignId: string;
       platform: string;
+      accountId: string | null;
+      providerCampaignId: string | null;
       currentDailyBudget: number | null;
       currency: string | null;
       reviewEnabled: boolean;
       lastReviewedAt: string | null;
+      delivery: CampaignDeliveryStatus | null;
     }>;
     pendingProposals: number;
   };
@@ -146,6 +150,8 @@ export interface AnalyticsServiceOptions {
   reviewer?: 'brain' | 'rules';
   /** Brain reviewer outer bounds (already narrowed to the gateway locks by config). */
   reviewBounds?: ReviewBounds;
+  /** Optional resolver for live provider delivery & moderation status per campaign. */
+  delivery?: CampaignDeliveryResolver | null;
   audit: HubAudit;
   now?: () => Date;
 }
@@ -960,6 +966,18 @@ export class AnalyticsService {
       return { ...reviewRow(existing.rows[0]), coalesced: true };
     }
     const review = reviewRow(inserted.rows[0]);
+    const deliveryStatus = this.options.delivery
+      ? await this.options.delivery
+          .resolve({
+            workspaceId: this.workspaceId,
+            userId,
+            probaCampaignId: campaign.probaCampaignId,
+            platform: campaign.platform,
+            accountId: campaign.accountId,
+            providerCampaignId: campaign.providerCampaignId,
+          })
+          .catch(() => null)
+      : null;
 
     const request: GatewayRunRequest = {
       traceId: randomUUID(),
@@ -981,6 +999,7 @@ export class AnalyticsService {
           platform: campaign.platform,
           ...(campaign.accountId ? { accountId: campaign.accountId } : {}),
           ...(campaign.providerCampaignId ? { providerCampaignId: campaign.providerCampaignId } : {}),
+          ...(deliveryStatus ? { deliveryStatus } : {}),
           reviewIntent: 'brain',
           reviewTrigger: opts.trigger,
           ...(wakeEvent ? { wakeEvent } : {}),
@@ -1238,18 +1257,37 @@ export class AnalyticsService {
         };
       });
     const pending = proposals.filter((p) => p.status === 'pending').length;
+    const deliveries = await Promise.all(
+      campaigns.map((c) =>
+        this.options.delivery
+          ? this.options.delivery
+              .resolve({
+                workspaceId: this.workspaceId,
+                userId,
+                probaCampaignId: c.probaCampaignId,
+                platform: c.platform,
+                accountId: c.accountId,
+                providerCampaignId: c.providerCampaignId,
+              })
+              .catch(() => null)
+          : Promise.resolve(null)
+      )
+    );
     return {
       goal: { id: String(g.id), title: String(g.title), status: String(g.status) },
       plan,
       now: {
         state: campaigns.length === 0 ? 'no_campaign' : pending > 0 ? 'awaiting_approval' : 'running',
-        campaigns: campaigns.map((c) => ({
+        campaigns: campaigns.map((c, idx) => ({
           probaCampaignId: c.probaCampaignId,
           platform: c.platform,
+          accountId: c.accountId,
+          providerCampaignId: c.providerCampaignId,
           currentDailyBudget: c.currentDailyBudget,
           currency: c.currency,
           reviewEnabled: c.reviewEnabled,
           lastReviewedAt: c.lastReviewedAt,
+          delivery: deliveries[idx] ?? null,
         })),
         pendingProposals: pending,
       },
@@ -1268,6 +1306,100 @@ export class AnalyticsService {
       },
       decisions,
     };
+  }
+
+  /**
+   * Emergency stop: best-effort pause all live provider campaigns & ads for this user across all platforms.
+   */
+  async emergencyPauseAll(userId: string): Promise<{ paused: number; failed: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND provider_campaign_id IS NOT NULL`,
+        [this.workspaceId, userId]
+      )
+    ).rows.map(campaignRow);
+    return this.pauseCampaignList(userId, campaigns, 'emergency_stop');
+  }
+
+  /**
+   * Manual override: pause every platform campaign belonging to one Proba goal owned by `userId`.
+   */
+  async pauseGoalCampaigns(userId: string, goalId: string): Promise<{ paused: number; failed: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3 AND provider_campaign_id IS NOT NULL`,
+        [this.workspaceId, userId, goalId]
+      )
+    ).rows.map(campaignRow);
+    return this.pauseCampaignList(userId, campaigns, 'manual_goal_pause');
+  }
+
+  /**
+   * Manual override: pause a single platform campaign owned by `userId`.
+   */
+  async pauseSingleCampaign(
+    userId: string,
+    probaCampaignId: string
+  ): Promise<{ paused: number; failed: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3 AND provider_campaign_id IS NOT NULL`,
+        [this.workspaceId, userId, probaCampaignId]
+      )
+    ).rows.map(campaignRow);
+    if (campaigns.length === 0) {
+      throw Object.assign(new Error('campaign not found'), { statusCode: 404, code: 'campaign_not_found' });
+    }
+    return this.pauseCampaignList(userId, campaigns, 'manual_platform_pause');
+  }
+
+  private async pauseCampaignList(
+    userId: string,
+    campaigns: AnalyticsCampaign[],
+    reasonTag: 'emergency_stop' | 'manual_goal_pause' | 'manual_platform_pause'
+  ): Promise<{ paused: number; failed: number }> {
+    const pauseFn = this.options.delivery?.pauseCampaign?.bind(this.options.delivery);
+    if (!pauseFn) return { paused: 0, failed: 0 };
+    let paused = 0;
+    let failed = 0;
+    for (const c of campaigns) {
+      const res = await pauseFn({
+        workspaceId: this.workspaceId,
+        userId,
+        probaCampaignId: c.probaCampaignId,
+        platform: c.platform,
+        accountId: c.accountId,
+        providerCampaignId: c.providerCampaignId,
+      });
+      if (res.ok) {
+        paused += 1;
+        await this.options.audit.emit(
+          {
+            action: 'campaign.paused',
+            outcome: 'success',
+            userId,
+            workspaceId: this.workspaceId,
+            goalId: c.goalId,
+            threadId: c.threadId,
+            target: { type: 'campaign', id: c.probaCampaignId },
+            tags: [reasonTag],
+            details: {
+              probaCampaignId: c.probaCampaignId,
+              platform: c.platform,
+              providerCampaignId: c.providerCampaignId,
+              adsPaused: res.adsPaused,
+              emergencyStop: reasonTag === 'emergency_stop',
+              manualOverride: reasonTag !== 'emergency_stop',
+              grantsSpend: false,
+            },
+          },
+          { bestEffort: true }
+        );
+      } else {
+        failed += 1;
+      }
+    }
+    return { paused, failed };
   }
 
   // ---------------------------------------------------------------- helpers

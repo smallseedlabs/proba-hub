@@ -50,6 +50,13 @@ export interface GatewayBrainOptions {
   store: GatewayRunStore;
   audit?: GatewayBrainAudit;
   budget?: Record<string, unknown>;
+  onCampaignCreated?: (info: {
+    workspaceId: string;
+    userId: string;
+    goalId?: string;
+    threadId?: string;
+    outcome: Record<string, unknown>;
+  }) => Promise<void>;
 }
 
 const RESUME_ASK_TYPES = new Set(['action_approval', 'plan_approval', 'research_review']);
@@ -108,6 +115,25 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       { userId, threadId, runId: snapshot.runId, status: snapshot.status, stepType: request.stepType },
       'gateway run finished'
     );
+
+    if (
+      this.options.onCampaignCreated &&
+      snapshot.actionOutcome &&
+      snapshot.actionOutcome.verb === 'ads.create_campaign' &&
+      snapshot.actionOutcome.ok === true
+    ) {
+      try {
+        await this.options.onCampaignCreated({
+          workspaceId,
+          userId,
+          goalId: goalId ?? pending?.goalId,
+          threadId: threadId ?? pending?.threadId,
+          outcome: snapshot.actionOutcome,
+        });
+      } catch (err) {
+        logger.warn({ err, userId, threadId, runId: snapshot.runId }, 'failed to auto-register analytics campaign');
+      }
+    }
 
     const nextUrl = resume?.choice === 'edit' ? userSuppliedInputFromCommand(command) : undefined;
     if (nextUrl && pending) {

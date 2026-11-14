@@ -257,6 +257,36 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Manual override: pause all platform campaigns under a single Proba goal.
+  fastify.post<{ Params: { goalId: string } }>(
+    '/goals/:goalId/pause',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.pauseGoalCampaigns(request.user!.id, request.params.goalId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  // Manual override: pause one specific platform campaign under a Proba goal.
+  fastify.post<{ Params: { campaignId: string } }>(
+    '/campaigns/:campaignId/pause',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { campaignId: { type: 'string', minLength: 1 } } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.pauseSingleCampaign(request.user!.id, request.params.campaignId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Operator-approved creative/targeting for Reddit post creation on a goal.
   fastify.get<{ Params: { goalId: string } }>(
     '/goals/:goalId/creative',
