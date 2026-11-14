@@ -1,3 +1,4 @@
+import { WAKE_EVENTS, type WakeEvent } from '../analytics/reviewer.js';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { pool, transaction } from '../db/client.js';
 import { getAudit } from '../audit/service.js';
@@ -114,7 +115,7 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
 
   fastify.post<{
     Params: { probaCampaignId: string };
-    Body: { intent?: 'report' | 'propose_pause' | 'propose_cap'; dailyBudget?: number };
+    Body: { intent?: 'report' | 'propose_pause' | 'propose_cap' | 'brain'; dailyBudget?: number };
   }>(
     '/analytics/campaigns/:probaCampaignId/review',
     {
@@ -125,7 +126,7 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
           type: 'object',
           additionalProperties: false,
           properties: {
-            intent: { type: 'string', enum: ['report', 'propose_pause', 'propose_cap'] },
+            intent: { type: 'string', enum: ['report', 'propose_pause', 'propose_cap', 'brain'] },
             dailyBudget: { type: 'number' },
           },
         },
@@ -135,12 +136,43 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
       const service = need(reply);
       if (!service) return;
       try {
+        if (request.body?.intent === 'brain') {
+          const review = await service.runBrainReview(request.user!.id, request.params.probaCampaignId, { trigger: 'manual' });
+          return reply.send({ review });
+        }
+        const intent = request.body?.intent;
         const review = await service.runReview(request.user!.id, request.params.probaCampaignId, {
           trigger: 'manual',
-          intent: request.body?.intent ?? 'report',
+          intent: intent ?? 'report',
           ...(request.body?.dailyBudget !== undefined ? { dailyBudget: request.body.dailyBudget } : {}),
         });
         return reply.send({ review });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  // Wake the brain reviewer early on a pressing event (it still decides what, if anything, to change).
+  fastify.post<{ Params: { probaCampaignId: string }; Body: { event: WakeEvent } }>(
+    '/analytics/campaigns/:probaCampaignId/wake',
+    {
+      onRequest: [fastify.authenticate],
+      schema: {
+        params: { type: 'object', properties: { probaCampaignId: campaignId } },
+        body: {
+          type: 'object',
+          required: ['event'],
+          additionalProperties: false,
+          properties: { event: { type: 'string', enum: [...WAKE_EVENTS] } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send({ campaign: await service.wake(request.user!.id, request.params.probaCampaignId, request.body.event) });
       } catch (error) {
         return sendError(reply, error);
       }
@@ -204,6 +236,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
         return reply.send({
           proposal: await service.decide(request.user!.id, request.params.proposalId, request.body.decision),
         });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  // Goal page: Now / Next / Spend vs cap / Progress / Recent decisions (audited numbers only; unknown is null).
+  fastify.get<{ Params: { goalId: string } }>(
+    '/goals/:goalId/status',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.goalStatus(request.user!.id, request.params.goalId));
       } catch (error) {
         return sendError(reply, error);
       }

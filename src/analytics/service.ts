@@ -35,6 +35,15 @@ import {
   type MetricTotals,
   type ReviewIntent,
 } from './rules.js';
+import {
+  clampNextCheck,
+  dueCheckpoint,
+  reviewNoteOf,
+  wakeTime,
+  type ReviewBounds,
+  type WakeEvent,
+} from './reviewer.js';
+import { REVIEW_LOCKS } from './reviewer.js';
 
 export const AD_PLATFORMS = ['reddit', 'microsoft', 'google', 'meta'] as const;
 export type AdPlatform = (typeof AD_PLATFORMS)[number];
@@ -61,16 +70,43 @@ export interface AnalyticsCampaign {
   currency: string | null;
   reviewEnabled: boolean;
   rules: AnalyticsRules;
+  /** When the brain reviewer wants to look again, and why (null before the first review). */
+  nextCheckAt: string | null;
+  nextCheckReason: string | null;
+  lastReviewedAt: string | null;
+  checkpointsDone: string[];
+  wakeEvent: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface GoalStatus {
+  goal: { id: string; title: string; status: string };
+  plan: Record<string, unknown> | null;
+  now: {
+    state: 'no_campaign' | 'awaiting_approval' | 'running';
+    campaigns: Array<{
+      probaCampaignId: string;
+      platform: string;
+      currentDailyBudget: number | null;
+      currency: string | null;
+      reviewEnabled: boolean;
+      lastReviewedAt: string | null;
+    }>;
+    pendingProposals: number;
+  };
+  next: { checkAt: string; reason: string | null; probaCampaignId: string } | null;
+  spend: { spent: number | null; dailyCap: number | null; totalCap: number | null; currency: string | null };
+  progress: { metric: string | null; target: number | null; actual: number | null; checkpointsDone: string[] };
+  decisions: Array<Record<string, unknown>>;
 }
 
 export interface AnalyticsReview {
   id: string;
   probaCampaignId: string;
   windowKey: string;
-  intent: ReviewIntent;
-  trigger: 'schedule' | 'manual';
+  intent: ReviewIntent | 'brain';
+  trigger: 'schedule' | 'manual' | 'event';
   status: string;
   outcome: string | null;
   decisionId: string | null;
@@ -106,6 +142,10 @@ export interface AnalyticsServiceOptions {
   workspaceId: string;
   tokenTtlSeconds: number;
   cadenceMs: number;
+  /** Scheduled reviews: brain or the deterministic owner-rule evaluator (default here; config defaults to brain). */
+  reviewer?: 'brain' | 'rules';
+  /** Brain reviewer outer bounds (already narrowed to the gateway locks by config). */
+  reviewBounds?: ReviewBounds;
   audit: HubAudit;
   now?: () => Date;
 }
@@ -138,6 +178,11 @@ function campaignRow(row: Record<string, unknown>): AnalyticsCampaign {
     currency: row.currency ? String(row.currency).trim() : null,
     reviewEnabled: Boolean(row.review_enabled),
     rules: (asRecord(row.rules) ?? {}) as AnalyticsRules,
+    nextCheckAt: row.next_check_at ? iso(row.next_check_at) : null,
+    nextCheckReason: (row.next_check_reason as string | null) ?? null,
+    lastReviewedAt: row.last_reviewed_at ? iso(row.last_reviewed_at) : null,
+    checkpointsDone: Array.isArray(row.checkpoints_done) ? (row.checkpoints_done as string[]) : [],
+    wakeEvent: (row.wake_event as string | null) ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -577,7 +622,7 @@ export class AnalyticsService {
     summary: Record<string, unknown>,
     proposal: Record<string, unknown>,
     reason: string,
-    trigger: 'schedule' | 'manual'
+    trigger: 'schedule' | 'manual' | 'brain'
   ): Promise<void> {
     const verb = typeof proposal.verb === 'string' ? proposal.verb : '';
     const args = asRecord(proposal.args);
@@ -809,19 +854,29 @@ export class AnalyticsService {
 
   /** One scheduler pass across all users' enabled campaigns. Coalesced per window. */
   async scheduleTick(): Promise<{ attempted: number; coalesced: number; skipped: number }> {
+    const brain = this.options.reviewer === 'brain';
+    // Brain reviewer: only campaigns whose chosen check time has come (first look after the minimum interval).
     const due = await pool.query<{ user_id: string; proba_campaign_id: string }>(
-      `SELECT c.user_id, c.proba_campaign_id FROM analytics_campaigns c
-       LEFT JOIN execution_state e ON e.user_id = c.user_id
-       WHERE c.workspace_id = $1 AND c.review_enabled = TRUE AND COALESCE(e.state, 'running') = 'running'
-       ORDER BY c.updated_at ASC LIMIT 500`,
-      [this.workspaceId]
+      brain
+        ? `SELECT c.user_id, c.proba_campaign_id FROM analytics_campaigns c
+           LEFT JOIN execution_state e ON e.user_id = c.user_id
+           WHERE c.workspace_id = $1 AND c.review_enabled = TRUE AND COALESCE(e.state, 'running') = 'running'
+             AND COALESCE(c.next_check_at, c.created_at + make_interval(secs => $2)) <= $3
+           ORDER BY COALESCE(c.next_check_at, c.created_at) ASC LIMIT 500`
+        : `SELECT c.user_id, c.proba_campaign_id FROM analytics_campaigns c
+           LEFT JOIN execution_state e ON e.user_id = c.user_id
+           WHERE c.workspace_id = $1 AND c.review_enabled = TRUE AND COALESCE(e.state, 'running') = 'running'
+           ORDER BY c.updated_at ASC LIMIT 500`,
+      brain ? [this.workspaceId, this.bounds.minCheckHours * 3600, this.now()] : [this.workspaceId]
     );
     let attempted = 0;
     let coalesced = 0;
     let skipped = 0;
     for (const row of due.rows) {
       try {
-        const review = await this.runReview(row.user_id, row.proba_campaign_id, { trigger: 'schedule' });
+        const review = brain
+          ? await this.runBrainReview(row.user_id, row.proba_campaign_id, { trigger: 'schedule' })
+          : await this.runReview(row.user_id, row.proba_campaign_id, { trigger: 'schedule' });
         if (review.coalesced) coalesced += 1;
         else attempted += 1;
       } catch (error) {
@@ -837,11 +892,382 @@ export class AnalyticsService {
         action: 'system.job_run',
         outcome: 'success',
         workspaceId: this.workspaceId,
-        details: { job: 'analytics_review_schedule', attempted, coalesced, skipped },
+        details: { job: 'analytics_review_schedule', reviewer: brain ? 'brain' : 'rules', attempted, coalesced, skipped },
       },
       { bestEffort: true }
     );
     return { attempted, coalesced, skipped };
+  }
+
+  // ---------------------------------------------------------------- brain reviewer
+
+  private get bounds(): ReviewBounds {
+    return this.options.reviewBounds ?? { ...REVIEW_LOCKS };
+  }
+
+  /** The approved plan saved by the plan card (goals.approved_plan, proba-hub#51); null when absent. */
+  private async approvedPlan(goalId: string): Promise<Record<string, unknown> | null> {
+    // to_jsonb keeps this safe on a schema without the column (plan card not migrated yet).
+    const result = await pool.query(`SELECT to_jsonb(g) -> 'approved_plan' AS plan FROM goals g WHERE g.id = $1`, [goalId]);
+    return asRecord(result.rows[0]?.plan) ?? null;
+  }
+
+  /**
+   * Start one system-initiated brain review (a normal gateway run with reviewIntent=brain). The brain decides
+   * whether to change anything and when to look again; Hub stores its note, clamps the next check to the
+   * bounds, and turns any change into the usual pending proposal (owner approval; never auto-executed).
+   */
+  async runBrainReview(
+    userId: string,
+    probaCampaignId: string,
+    opts: { trigger: 'schedule' | 'manual' | 'event'; wakeEvent?: WakeEvent }
+  ): Promise<AnalyticsReview> {
+    const campaign = await this.getCampaign(userId, probaCampaignId);
+    if (opts.trigger !== 'manual' && !campaign.reviewEnabled) {
+      throw new AnalyticsError('review_disabled', 'scheduled review is disabled for this campaign', 409);
+    }
+    const state = await getExecutionState(userId);
+    if (state !== 'running') {
+      throw new AnalyticsError('execution_paused', `execution is ${state}; reviews wait until resumed`, 409);
+    }
+    const now = this.now();
+    const bounds = this.bounds;
+    const plan = await this.approvedPlan(campaign.goalId);
+    const durationDays = typeof plan?.durationDays === 'number' ? plan.durationDays : undefined;
+    const checkpoint = dueCheckpoint(now, new Date(campaign.createdAt), campaign.checkpointsDone, durationDays);
+    const wakeEvent = opts.wakeEvent ?? (campaign.wakeEvent as WakeEvent | null) ?? undefined;
+    // Coalesce: one review per chosen check time (or per hour for manual / event wakes).
+    const slot =
+      opts.trigger === 'schedule' && !wakeEvent
+        ? `s:${campaign.nextCheckAt ?? 'first'}`
+        : `${opts.trigger}:${wakeEvent ?? ''}:${now.toISOString().slice(0, 13)}`;
+    const key = `brain:${stableUuid(slot, checkpoint ?? '').slice(0, 36)}`.slice(0, 64);
+    const idempotencyKey = stableUuid(this.workspaceId, userId, probaCampaignId, key, 'brain');
+    const inserted = await pool.query(
+      `INSERT INTO analytics_reviews
+         (workspace_id, user_id, proba_campaign_id, window_key, intent, trigger, idempotency_key)
+       VALUES ($1,$2,$3,$4,'brain',$5,$6)
+       ON CONFLICT (workspace_id, user_id, proba_campaign_id, window_key, intent) DO NOTHING
+       RETURNING *`,
+      [this.workspaceId, userId, probaCampaignId, key, opts.trigger, idempotencyKey]
+    );
+    if (!inserted.rows[0]) {
+      const existing = await pool.query(
+        `SELECT * FROM analytics_reviews WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3
+           AND window_key = $4 AND intent = 'brain'`,
+        [this.workspaceId, userId, probaCampaignId, key]
+      );
+      return { ...reviewRow(existing.rows[0]), coalesced: true };
+    }
+    const review = reviewRow(inserted.rows[0]);
+
+    const request: GatewayRunRequest = {
+      traceId: randomUUID(),
+      workspaceId: this.workspaceId,
+      userId,
+      goalId: campaign.goalId,
+      threadId: campaign.threadId,
+      stepId: review.id,
+      stepType: 'review_performance',
+      idempotencyKey,
+      command: {
+        kind: 'command',
+        clientMsgId: idempotencyKey,
+        type: 'send_message',
+        threadId: campaign.threadId,
+        payload: {
+          text: `campaign review (${opts.trigger}${wakeEvent ? `: ${wakeEvent}` : ''})`,
+          probaCampaignId,
+          platform: campaign.platform,
+          ...(campaign.accountId ? { accountId: campaign.accountId } : {}),
+          ...(campaign.providerCampaignId ? { providerCampaignId: campaign.providerCampaignId } : {}),
+          reviewIntent: 'brain',
+          reviewTrigger: opts.trigger,
+          ...(wakeEvent ? { wakeEvent } : {}),
+          ...(checkpoint ? { checkpoint } : {}),
+          ...(plan ? { plan } : {}),
+          ...(campaign.currentDailyBudget !== null ? { currentDailyBudget: campaign.currentDailyBudget } : {}),
+          ...(campaign.currency ? { currency: campaign.currency } : {}),
+          ...(campaign.lastReviewedAt ? { lastReviewedAt: campaign.lastReviewedAt } : {}),
+          launchedAt: campaign.createdAt,
+          reviewBounds: bounds,
+        },
+        sentAt: now.toISOString(),
+      },
+    };
+
+    await this.options.audit.emit(
+      {
+        action: 'analytics.queried',
+        outcome: 'partial',
+        userId,
+        workspaceId: this.workspaceId,
+        goalId: campaign.goalId,
+        threadId: campaign.threadId,
+        target: { type: 'campaign', id: probaCampaignId },
+        details: { reviewId: review.id, reviewer: 'brain', trigger: opts.trigger, wakeEvent, checkpoint, grantsSpend: false },
+      },
+      { bestEffort: true }
+    );
+
+    let snapshot: GatewayRunSnapshot;
+    try {
+      snapshot = await this.callGateway(request, campaign);
+    } catch (error) {
+      const code = error instanceof GatewayClientError ? error.code : 'gateway_error';
+      await pool.query(`UPDATE analytics_reviews SET status = 'failed', error_code = $2, updated_at = NOW() WHERE id = $1`, [review.id, code]);
+      // Try again after the minimum interval rather than every tick.
+      await this.scheduleNext(userId, probaCampaignId, new Date(now.getTime() + bounds.minCheckHours * 3_600_000), `review failed (${code}); retrying`, null);
+      await this.options.audit.emit(
+        {
+          action: 'system.job_failed',
+          outcome: 'failure',
+          userId,
+          workspaceId: this.workspaceId,
+          goalId: campaign.goalId,
+          target: { type: 'campaign', id: probaCampaignId },
+          errorCode: code,
+          details: { reviewId: review.id, job: 'campaign_review' },
+        },
+        { bestEffort: true }
+      );
+      return { ...review, status: 'failed', errorCode: code };
+    }
+
+    const summary = asRecord(snapshot.analytics) ?? null;
+    const outcome = typeof summary?.outcome === 'string' ? summary.outcome : null;
+    const decisionId = typeof summary?.decisionId === 'string' ? summary.decisionId : null;
+    const status = snapshot.status === 'completed' ? 'completed' : snapshot.status === 'blocked' ? 'blocked' : 'failed';
+    const note = reviewNoteOf(summary);
+    const next = status === 'completed' ? clampNextCheck(now, bounds, note?.nextCheckAt) : { at: new Date(now.getTime() + bounds.minCheckHours * 3_600_000), clamped: true };
+    const nextReason =
+      status !== 'completed'
+        ? `review ${status}${snapshot.error?.code ? ` (${snapshot.error.code})` : ''}; retrying`
+        : note?.nextCheckReason ?? 'no note from the review; default check';
+    const stored = summary
+      ? {
+          ...summary,
+          // A pending change lives until the next check the brain chose (clamped).
+          ...(note ? { reviewWindowUntil: next.at.toISOString(), review: { ...note, nextCheckAt: next.at.toISOString() } } : {}),
+        }
+      : null;
+    await pool.query(
+      `UPDATE analytics_reviews SET status = $2, outcome = $3, decision_id = $4, summary = $5, run_id = $6,
+         error_code = $7, updated_at = NOW() WHERE id = $1`,
+      [review.id, status, outcome, decisionId, stored ? JSON.stringify(stored) : null, snapshot.runId, snapshot.error?.code ?? null]
+    );
+    const doneCheckpoint = status === 'completed' && note?.kind === 'checkpoint' ? note.checkpoint?.checkpoint ?? checkpoint : undefined;
+    await this.scheduleNext(userId, probaCampaignId, next.at, nextReason, doneCheckpoint ?? null);
+    await this.options.audit.emit(
+      {
+        action: 'brain.decision_made',
+        outcome: status === 'completed' ? 'success' : 'denied',
+        userId,
+        workspaceId: this.workspaceId,
+        goalId: campaign.goalId,
+        threadId: campaign.threadId,
+        target: { type: 'campaign', id: probaCampaignId },
+        ...(snapshot.error?.code ? { errorCode: snapshot.error.code } : {}),
+        details: {
+          reviewId: review.id,
+          runId: snapshot.runId,
+          reviewer: 'brain',
+          trigger: opts.trigger,
+          kind: note?.kind ?? null,
+          decision: note?.decision ?? null,
+          whyNowOrNotYet: note?.whyNowOrNotYet?.slice(0, 400) ?? null,
+          nextCheckAt: next.at.toISOString(),
+          nextCheckReason: nextReason.slice(0, 200),
+          clamped: next.clamped,
+          checkpoint: doneCheckpoint ?? null,
+          outcome,
+          decisionId,
+          grantsSpend: false,
+        },
+      },
+      { bestEffort: true }
+    );
+
+    const proposal = asRecord(summary?.proposal);
+    if (status === 'completed' && outcome === 'dry_run_proposal' && proposal && decisionId && stored) {
+      const reason = [note?.summary, note?.whyNowOrNotYet].filter(Boolean).join(' ').slice(0, 1000) || 'campaign review';
+      await this.recordProposal(userId, campaign, review.id, decisionId, stored, proposal, reason, 'brain');
+    }
+    return { ...review, status, outcome, decisionId, summary: stored };
+  }
+
+  private async scheduleNext(userId: string, probaCampaignId: string, at: Date, reason: string, checkpoint: string | null): Promise<void> {
+    await pool.query(
+      `UPDATE analytics_campaigns SET next_check_at = $4, next_check_reason = $5, last_reviewed_at = $7, wake_event = NULL,
+         checkpoints_done = CASE WHEN $6::text IS NULL OR $6 = ANY(checkpoints_done) THEN checkpoints_done ELSE array_append(checkpoints_done, $6::text) END,
+         updated_at = NOW()
+       WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3`,
+      [this.workspaceId, userId, probaCampaignId, at, reason.slice(0, 500), checkpoint, this.now()]
+    );
+  }
+
+  /**
+   * A pressing event (metrics anomaly, disapproval, spend pace, budget nearly gone, off track) wakes the
+   * review early. Urgent events run on the next tick; others wait for the minimum interval since the last review.
+   */
+  async wake(userId: string, probaCampaignId: string, event: WakeEvent): Promise<AnalyticsCampaign> {
+    const campaign = await this.getCampaign(userId, probaCampaignId);
+    const at = wakeTime(
+      this.now(),
+      this.bounds,
+      event,
+      campaign.lastReviewedAt ? new Date(campaign.lastReviewedAt) : null,
+      campaign.nextCheckAt ? new Date(campaign.nextCheckAt) : null
+    );
+    const result = await pool.query(
+      `UPDATE analytics_campaigns SET next_check_at = $4, next_check_reason = $5, wake_event = $6, updated_at = NOW()
+       WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3 RETURNING *`,
+      [this.workspaceId, userId, probaCampaignId, at, `woken: ${event}`, event]
+    );
+    await this.options.audit.emit(
+      {
+        action: 'analytics.queried',
+        outcome: 'partial',
+        userId,
+        workspaceId: this.workspaceId,
+        goalId: campaign.goalId,
+        threadId: campaign.threadId,
+        target: { type: 'campaign', id: probaCampaignId },
+        details: { reviewer: 'brain', wakeEvent: event, nextCheckAt: at.toISOString(), grantsSpend: false },
+      },
+      { bestEffort: true }
+    );
+    return campaignRow(result.rows[0]);
+  }
+
+  // ---------------------------------------------------------------- goal page
+
+  /**
+   * One read for the goal page: Now / Next / Spend vs cap / Progress / Recent decisions. Numbers come only
+   * from the latest audited review metrics; anything missing is null (unknown), never zero.
+   */
+  async goalStatus(userId: string, goalId: string): Promise<GoalStatus> {
+    const goal = await pool.query(
+      `SELECT id, title, status, budget, to_jsonb(g) -> 'approved_plan' AS plan FROM goals g WHERE id = $1 AND user_id = $2`,
+      [goalId, userId]
+    );
+    const g = goal.rows[0];
+    if (!g) throw new AnalyticsError('goal_not_found', 'goal not found', 404);
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3 ORDER BY created_at`,
+        [this.workspaceId, userId, goalId]
+      )
+    ).rows.map(campaignRow);
+    const ids = campaigns.map((c) => c.probaCampaignId);
+    const reviews = ids.length
+      ? (
+          await pool.query(
+            `SELECT * FROM analytics_reviews WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = ANY($3)
+               AND status = 'completed' ORDER BY created_at DESC LIMIT 20`,
+            [this.workspaceId, userId, ids]
+          )
+        ).rows.map(reviewRow)
+      : [];
+    const proposals = ids.length
+      ? (
+          await pool.query(
+            `SELECT id, review_id, verb, status, created_at FROM analytics_proposals
+             WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = ANY($3) ORDER BY created_at DESC LIMIT 20`,
+            [this.workspaceId, userId, ids]
+          )
+        ).rows
+      : [];
+    const plan = asRecord(g.plan) ?? null;
+    const budget = asRecord(g.budget) ?? {};
+
+    // Latest audited metrics per campaign (from the newest completed review that has metrics).
+    const latest = new Map<string, Record<string, unknown>[]>();
+    for (const r of reviews) {
+      const rows = Array.isArray(r.summary?.metrics) ? (r.summary!.metrics as Record<string, unknown>[]) : [];
+      if (rows.length > 0 && !latest.has(r.probaCampaignId)) latest.set(r.probaCampaignId, rows);
+    }
+    const sumOf = (field: string): number | null => {
+      if (campaigns.length === 0 || latest.size < campaigns.length) return null;
+      let total = 0;
+      for (const rows of latest.values()) {
+        for (const row of rows) {
+          const v = row[field];
+          if (typeof v !== 'number') return null;
+          total += v;
+        }
+      }
+      return total;
+    };
+    const spent = sumOf('spend');
+    const clicks = sumOf('clicks');
+    const impressions = sumOf('impressions');
+    const conversions = sumOf('conversions');
+    const metric = typeof plan?.successMetric === 'string' ? plan.successMetric : null;
+    const actual =
+      metric === 'clicks' ? clicks
+      : metric === 'conversions' || metric === 'signups' ? conversions
+      : metric === 'ctr' ? (clicks !== null && impressions ? clicks / impressions : null)
+      : metric === 'cpc' ? (spent !== null && clicks ? spent / clicks : null)
+      : null;
+    const nextRow = campaigns
+      .filter((c) => c.reviewEnabled && c.nextCheckAt)
+      .sort((a, b) => Date.parse(a.nextCheckAt!) - Date.parse(b.nextCheckAt!))[0];
+    const dailyCap = campaigns.every((c) => c.currentDailyBudget !== null) && campaigns.length > 0
+      ? campaigns.reduce((t, c) => t + (c.currentDailyBudget ?? 0), 0)
+      : null;
+    const proposalByReview = new Map(proposals.map((p) => [String(p.review_id), p]));
+    const decisions = reviews
+      .filter((r) => r.summary?.review)
+      .slice(0, 10)
+      .map((r) => {
+        const note = reviewNoteOf(r.summary)!;
+        const p = proposalByReview.get(r.id);
+        return {
+          at: r.createdAt,
+          probaCampaignId: r.probaCampaignId,
+          trigger: r.trigger,
+          kind: note.kind ?? 'review',
+          decision: note.decision ?? null,
+          summary: note.summary ?? null,
+          whyNowOrNotYet: note.whyNowOrNotYet ?? null,
+          nextCheckAt: note.nextCheckAt ?? null,
+          nextCheckReason: note.nextCheckReason ?? null,
+          checkpoint: (note.checkpoint as Record<string, unknown> | undefined) ?? null,
+          proposal: p ? { id: String(p.id), verb: String(p.verb), status: String(p.status) } : null,
+        };
+      });
+    const pending = proposals.filter((p) => p.status === 'pending').length;
+    return {
+      goal: { id: String(g.id), title: String(g.title), status: String(g.status) },
+      plan,
+      now: {
+        state: campaigns.length === 0 ? 'no_campaign' : pending > 0 ? 'awaiting_approval' : 'running',
+        campaigns: campaigns.map((c) => ({
+          probaCampaignId: c.probaCampaignId,
+          platform: c.platform,
+          currentDailyBudget: c.currentDailyBudget,
+          currency: c.currency,
+          reviewEnabled: c.reviewEnabled,
+          lastReviewedAt: c.lastReviewedAt,
+        })),
+        pendingProposals: pending,
+      },
+      next: nextRow ? { checkAt: nextRow.nextCheckAt!, reason: nextRow.nextCheckReason, probaCampaignId: nextRow.probaCampaignId } : null,
+      spend: {
+        spent,
+        dailyCap,
+        totalCap: typeof budget.total === 'number' ? budget.total : null,
+        currency: campaigns.find((c) => c.currency)?.currency ?? (typeof budget.currency === 'string' ? budget.currency : null),
+      },
+      progress: {
+        metric,
+        target: typeof plan?.successTarget === 'number' ? plan.successTarget : null,
+        actual,
+        checkpointsDone: [...new Set(campaigns.flatMap((c) => c.checkpointsDone))],
+      },
+      decisions,
+    };
   }
 
   // ---------------------------------------------------------------- helpers

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { config as loadEnv } from 'dotenv';
 import { resolveJwtSecret } from './auth/jwt-secret.js';
+import { reviewBoundsFrom } from './analytics/reviewer.js';
 
 /** Id of the workspace every user belongs to until the Hub models workspaces. */
 export const DEFAULT_WORKSPACE_ID = 'seedbed';
@@ -253,6 +254,17 @@ export const config = {
     cadenceMs: Math.max(60_000, envInt('ANALYTICS_REVIEW_CADENCE_MS', 6 * 60 * 60 * 1000)),
     /** How often the scheduler checks for due campaigns. */
     tickMs: Math.max(10_000, envInt('ANALYTICS_SCHEDULER_TICK_MS', 5 * 60 * 1000)),
+    /**
+     * Who decides on a scheduled review: `brain` (default) starts a system-initiated brain run that picks its
+     * own next check; `rules` keeps the deterministic owner-rule evaluator on the fixed cadence.
+     */
+    reviewer: (process.env.ANALYTICS_REVIEWER === 'rules' ? 'rules' : 'brain') as 'brain' | 'rules',
+    /** Outer bounds for the brain reviewer, tighten-only against the gateway locks (1h..168h, max 20% auto change). */
+    reviewBounds: reviewBoundsFrom({
+      minCheckHours: envNumber('ANALYTICS_REVIEW_MIN_CHECK_HOURS', 6),
+      maxCheckHours: envNumber('ANALYTICS_REVIEW_MAX_CHECK_HOURS', 72),
+      maxAutoChangePct: envNumber('ANALYTICS_REVIEW_MAX_AUTO_CHANGE_PCT', 20),
+    }),
   },
 
   /**

@@ -148,6 +148,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
           workspaceId: config.audit.workspaceId,
           tokenTtlSeconds: config.gateway.tokenTtlSeconds,
           cadenceMs: config.analytics.cadenceMs,
+          reviewer: config.analytics.reviewer,
+          reviewBounds: config.analytics.reviewBounds,
           audit: getAudit(),
         })
       : null;
