@@ -1353,6 +1353,81 @@ export class AnalyticsService {
     return this.pauseCampaignList(userId, campaigns, 'manual_platform_pause');
   }
 
+  /**
+   * Manual override: cancel an entire goal owned by `userId`.
+   * Pauses all live provider campaigns, rejects pending proposals, disables future bot reviews,
+   * and marks the goal `cancelled` while preserving all historical data, metrics, and thread logs.
+   */
+  async cancelGoal(
+    userId: string,
+    goalId: string
+  ): Promise<{ goalId: string; status: 'cancelled'; paused: number; failed: number; proposalsCancelled: number }> {
+    const goalRes = await pool.query(
+      `SELECT id, title, status, thread_id FROM goals WHERE id = $1 AND user_id = $2`,
+      [goalId, userId]
+    );
+    const goal = goalRes.rows[0] as { id: string; title: string; status: string; thread_id: string } | undefined;
+    if (!goal) throw new AnalyticsError('goal_not_found', 'goal not found', 404);
+
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3`,
+        [this.workspaceId, userId, goalId]
+      )
+    ).rows.map(campaignRow);
+    const liveCampaigns = campaigns.filter((c) => Boolean(c.providerCampaignId));
+    const { paused, failed } = await this.pauseCampaignList(userId, liveCampaigns, 'manual_goal_pause');
+
+    await pool.query(
+      `UPDATE analytics_campaigns
+       SET review_enabled = false, next_review_at = NULL, updated_at = now()
+       WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3`,
+      [this.workspaceId, userId, goalId]
+    );
+
+    let proposalsCancelled = 0;
+    const ids = campaigns.map((c) => c.probaCampaignId);
+    if (ids.length > 0) {
+      const propRes = await pool.query(
+        `UPDATE analytics_proposals
+         SET status = 'rejected', decided_at = now()
+         WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = ANY($3) AND status = 'pending'`,
+        [this.workspaceId, userId, ids]
+      );
+      proposalsCancelled = propRes.rowCount ?? 0;
+    }
+
+    await pool.query(
+      `UPDATE goals SET status = 'cancelled', updated_at = now() WHERE id = $1 AND user_id = $2`,
+      [goalId, userId]
+    );
+
+    await this.options.audit.emit(
+      {
+        action: 'goal.status_changed',
+        outcome: 'success',
+        userId,
+        workspaceId: this.workspaceId,
+        goalId,
+        threadId: goal.thread_id,
+        target: { type: 'goal', id: goalId },
+        tags: ['manual_goal_cancel'],
+        details: {
+          goalId,
+          from: goal.status,
+          to: 'cancelled',
+          paused,
+          failed,
+          proposalsCancelled,
+          grantsSpend: false,
+        },
+      },
+      { bestEffort: true }
+    );
+
+    return { goalId, status: 'cancelled', paused, failed, proposalsCancelled };
+  }
+
   private async pauseCampaignList(
     userId: string,
     campaigns: AnalyticsCampaign[],

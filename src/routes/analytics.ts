@@ -272,6 +272,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Manual override: cancel an entire goal (stops campaigns, pending proposals, and scheduled reviews while preserving history).
+  fastify.post<{ Params: { goalId: string } }>(
+    '/goals/:goalId/cancel',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.cancelGoal(request.user!.id, request.params.goalId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Manual override: pause one specific platform campaign under a Proba goal.
   fastify.post<{ Params: { campaignId: string } }>(
     '/campaigns/:campaignId/pause',
