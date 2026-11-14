@@ -163,6 +163,7 @@ function decorateCreativeDraftAsk(envelope: DraftAskEnvelope, draft: CreativeDra
           type: draft.type,
           headline: draft.headline,
           body: draft.body,
+          ...(draft.imageUrl ? { imageUrl: draft.imageUrl } : {}),
           ...(draft.rationale ? { rationale: draft.rationale } : {}),
           claims: draft.claims,
           landingPageUrl: draft.landingPageUrl,

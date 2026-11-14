@@ -15,6 +15,8 @@ export interface CreativeDraft {
   headline: string;
   body: string;
   landingPageUrl: string;
+  /** Validated image from the operator's landing page (accepted img-* research source). */
+  imageUrl?: string;
   rationale?: string;
   claims: Array<{ text: string; findingId: string }>;
   researchArtifactId?: string;
@@ -58,10 +60,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** The checked draft from a gateway tool_call output; undefined when it is not a well-formed draft. */
 export function draftFromParameters(parameters: unknown): CreativeDraft | undefined {
   if (!isRecord(parameters)) return undefined;
-  const { headline, body, landingPageUrl, rationale, claims, researchArtifactId, researchVersion, targeting, plan } = parameters;
+  const { headline, body, landingPageUrl, imageUrl, rationale, claims, researchArtifactId, researchVersion, targeting, plan } = parameters;
   if (typeof headline !== 'string' || typeof body !== 'string' || typeof landingPageUrl !== 'string') return undefined;
   const parsed = parseApprovedCreative({ type: 'TEXT', headline, body });
   if (!parsed.ok) return undefined;
+  let validatedImageUrl: string | undefined;
+  if (typeof imageUrl === 'string' && imageUrl.trim()) {
+    const imgParsed = parseApprovedCreative({ type: 'IMAGE', headline, body, mediaUrl: imageUrl });
+    if (!imgParsed.ok || imgParsed.creative.type !== 'IMAGE') return undefined;
+    validatedImageUrl = imgParsed.creative.mediaUrl;
+  }
   const cleanClaims = Array.isArray(claims)
     ? claims
         .filter((c): c is { text: string; findingId: string } => isRecord(c) && typeof c.text === 'string' && typeof c.findingId === 'string')
@@ -73,6 +81,7 @@ export function draftFromParameters(parameters: unknown): CreativeDraft | undefi
     headline: parsed.creative.headline,
     body: (parsed.creative as { body: string }).body,
     landingPageUrl,
+    ...(validatedImageUrl ? { imageUrl: validatedImageUrl } : {}),
     ...(typeof rationale === 'string' && rationale.trim() ? { rationale: rationale.trim().slice(0, 1000) } : {}),
     claims: cleanClaims,
     ...(typeof researchArtifactId === 'string' ? { researchArtifactId: researchArtifactId.slice(0, 64) } : {}),
@@ -129,9 +138,13 @@ export function creativeFromDraftAnswer(
 ): { ok: true; creative: ApprovedCreative; edited: boolean } | { ok: false; error: string } {
   const headline = typeof values?.headline === 'string' ? values.headline : draft.headline;
   const body = typeof values?.body === 'string' ? values.body : draft.body;
-  const parsed = parseApprovedCreative({ type: 'TEXT', headline, body });
+  const removedImage = values?.useImage === false || values?.imageUrl === '' || values?.imageUrl === null;
+  const keepImage = Boolean(draft.imageUrl) && !removedImage;
+  const parsed = keepImage
+    ? parseApprovedCreative({ type: 'IMAGE', headline, body, mediaUrl: draft.imageUrl })
+    : parseApprovedCreative({ type: 'TEXT', headline, body });
   if (!parsed.ok) return parsed;
-  const p = parsed.creative as { headline: string; body: string };
-  const edited = p.headline !== draft.headline || p.body !== draft.body;
+  const p = parsed.creative as { headline: string; body?: string };
+  const edited = p.headline !== draft.headline || (p.body ?? '') !== draft.body || (Boolean(draft.imageUrl) && removedImage);
   return { ok: true, creative: parsed.creative, edited };
 }
