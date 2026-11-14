@@ -144,12 +144,18 @@ describe('audit outbox: written in the action’s own transaction', () => {
   });
 
   it('a command whose processing transaction rolls back loses its in-transaction events but records the failure', async () => {
-    const throwingBrain: BrainPort = { process: async () => { throw new Error('model unavailable'); } };
+    // Brain failures now get an error event (answer_ask / approve_plan included), so the rollback is
+    // forced after the brain step: the goal-update hook throws outside any brain-failure handling.
+    const throwingBrain: BrainPort = {
+      process: async () => [{ type: 'reply', text: 'ok' }],
+      takeGoalUpdate: () => {
+        throw new Error('model unavailable');
+      },
+    };
     const failing = await buildApp({ startBackgroundJobs: false, brain: throwingBrain });
     try {
       const user = await createTestUser(failing, 'rollback');
       const clientMsgId = randomUUID();
-      // approve_plan has no error-event fallback: a brain failure aborts and rolls back the transaction.
       const res = await failing.inject({
         method: 'POST',
         url: '/v1/commands',
@@ -177,7 +183,8 @@ describe('audit outbox: written in the action’s own transaction', () => {
       const processed = events.filter((e) => e.action === 'command.processed');
       expect(processed).toHaveLength(1);
       expect(processed[0]).toMatchObject({ outcome: 'failure', errorCode: 'command_processing_failed' });
-      expect(events.find((e) => e.action === 'brain.error')).toMatchObject({ outcome: 'failure', errorCode: 'brain_failed' });
+      // Not a brain failure: no brain.error is recorded for a post-brain rollback.
+      expect(actions).not.toContain('brain.error');
       const stored = await pool.query('SELECT 1 FROM commands WHERE user_id = $1 AND client_msg_id = $2', [user.userId, clientMsgId]);
       expect(stored.rows).toHaveLength(0);
       expectOneConsistentTrace(events, clientMsgId);

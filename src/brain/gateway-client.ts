@@ -76,13 +76,16 @@ export class GatewayClientError extends Error {
   readonly code: string;
   readonly status?: number;
   readonly retryable: boolean;
+  /** Gateway run status when the error came from a finished run snapshot (e.g. failed). */
+  readonly runStatus?: string;
 
-  constructor(code: string, message: string, status?: number, retryable = false) {
+  constructor(code: string, message: string, status?: number, retryable = false, runStatus?: string) {
     super(message);
     this.name = 'GatewayClientError';
     this.code = code;
     this.status = status;
     this.retryable = retryable;
+    this.runStatus = runStatus;
   }
 }
 

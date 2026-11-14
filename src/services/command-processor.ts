@@ -318,6 +318,7 @@ export class CommandProcessor {
         );
         
         await this.addToOutbox(client, userId, errorEvent.id);
+        await this.markCommandFailed(client, command.id);
         await this.auditBrainFailure(client, scope, error, cause);
         await this.auditProcessed(client, scope, startedAt, [errorEvent], 'failure', 'brain_error');
         return { command, events: [errorEvent] };
@@ -450,20 +451,8 @@ export class CommandProcessor {
       } catch (error) {
         if (!(error instanceof BrainCallError)) throw error;
         await client.query('ROLLBACK TO SAVEPOINT answer_ask');
-        const cause = error.cause;
-        logger.error({ error: cause, userId, askId: answerPayload.askId }, 'Brain processing failed after answer_ask');
-        const errorEvent = await this.createErrorEvent(
-          client,
-          userId,
-          envelope.threadId,
-          'brain_error',
-          brainFailureMessage(cause, { answeringAsk: true }),
-          { askId: String(answerPayload.askId), retryable: true }
-        );
-        await this.addToOutbox(client, userId, errorEvent.id);
-        await this.auditBrainFailure(client, scope, error, cause);
-        await this.auditProcessed(client, scope, startedAt, [errorEvent], 'failure', 'brain_error');
-        return { command, events: [errorEvent] };
+        logger.error({ error: error.cause, userId, askId: answerPayload.askId }, 'Brain processing failed after answer_ask');
+        return this.failAnsweredAsk(client, scope, command, envelope, startedAt, error, String(answerPayload.askId));
       }
       const brainSpan = called.span;
       const brainOutputs = budgetDeclined
@@ -504,6 +493,8 @@ export class CommandProcessor {
       const planPayload = envelope.payload as Record<string, unknown>;
       logger.info({ planId: planPayload.planId }, 'Handling approve_plan command');
 
+      // If the brain step behind this decision fails, the decision is undone (same as answer_ask).
+      await client.query('SAVEPOINT approve_plan');
       // The plan was presented as a plan_approval ask: resolve it so every
       // client (and a reload) sees it as decided.
       const planResolved = await this.resolvePlanAsk(client, userId, envelope.threadId, planPayload);
@@ -516,7 +507,16 @@ export class CommandProcessor {
       // After approving plan, invoke brain to generate next step
       const context = await this.buildContext(client, userId, envelope.threadId);
       this.attachOperatorScope(context, envelope);
-      const called = await this.callBrain(client, scope, envelope, context);
+      let called: Awaited<ReturnType<CommandProcessor['callBrain']>>;
+      try {
+        called = await this.callBrain(client, scope, envelope, context);
+      } catch (error) {
+        if (!(error instanceof BrainCallError)) throw error;
+        await client.query('ROLLBACK TO SAVEPOINT approve_plan');
+        logger.error({ error: error.cause, userId, planId: planPayload.planId }, 'Brain processing failed after approve_plan');
+        const planId = typeof planPayload.planId === 'string' && UUID_RE.test(planPayload.planId) ? planPayload.planId : undefined;
+        return this.failAnsweredAsk(client, scope, command, envelope, startedAt, error, planId);
+      }
       const brainSpan = called.span;
       const brainOutputs = budgetDeclined
         ? await this.enforceBudgetDecline(client, scope, called.outputs, String(planPayload.planId), brainSpan)
@@ -1920,6 +1920,70 @@ export class CommandProcessor {
     ]);
   }
 
+  /**
+   * The brain step behind an answer (answer_ask / approve_plan) failed; the answer was rolled back.
+   * If the gateway run is still waiting, the ask stays pending and the card can be answered again
+   * (retryable). If the run is dead (or the gateway no longer holds this approval), the ask is
+   * expired so the card closes instead of reopening forever. Either way the command is failed.
+   */
+  private async failAnsweredAsk(
+    client: PoolClient,
+    scope: AuditScope,
+    command: Command,
+    envelope: CommandEnvelope,
+    startedAt: number,
+    error: BrainCallError,
+    askId: string | undefined
+  ): Promise<{ command: Command; events: Event[] }> {
+    const cause = error.cause;
+    const closed = isTerminalBrainFailure(cause);
+    const events: Event[] = [];
+    if (closed && askId && envelope.threadId) {
+      const expired = await this.expireAsk(client, scope.userId, envelope.threadId, askId);
+      if (expired) events.push(expired);
+    }
+    const errorEvent = await this.createErrorEvent(
+      client,
+      scope.userId,
+      envelope.threadId,
+      'brain_error',
+      brainFailureMessage(cause, { answeringAsk: true, askClosed: closed }),
+      { ...(askId ? { askId } : {}), retryable: !closed }
+    );
+    await this.addToOutbox(client, scope.userId, errorEvent.id);
+    events.push(errorEvent);
+    await this.markCommandFailed(client, command.id);
+    await this.auditBrainFailure(client, scope, error, cause);
+    await this.auditProcessed(client, scope, startedAt, events, 'failure', 'brain_error');
+    return { command, events };
+  }
+
+  /** Close a still-pending ask whose gateway run can no longer continue. */
+  private async expireAsk(client: PoolClient, userId: string, threadId: string, askId: string): Promise<Event | null> {
+    const updated = await client.query(
+      `UPDATE asks SET status = 'expired' WHERE id = $1 AND thread_id = $2 AND status = 'pending' RETURNING id`,
+      [askId, threadId]
+    );
+    if (updated.rowCount === 0) return null;
+    await client.query(`UPDATE inbox_items SET status = 'expired', updated_at = NOW() WHERE related_ask_id = $1`, [askId]);
+    const seq = await this.getNextSeq(client, userId);
+    const result = await client.query<Event>(
+      `INSERT INTO events (user_id, seq, type, thread_id, payload, created_at)
+       VALUES ($1, $2, 'ask_resolved', $3, $4, NOW())
+       RETURNING id, user_id as "userId", seq, type, thread_id as "threadId",
+                 payload, created_at as "createdAt"`,
+      [userId, seq, threadId, toJsonb({ askId, resolution: 'expired' })]
+    );
+    const event = result.rows[0];
+    await this.addToOutbox(client, userId, event.id);
+    return event;
+  }
+
+  /** A command whose brain step failed is finished: it must not stay `accepted`. */
+  private async markCommandFailed(client: PoolClient, commandId: string): Promise<void> {
+    await client.query('UPDATE commands SET status = $1, processed_at = NOW() WHERE id = $2', ['failed', commandId]);
+  }
+
   private async createErrorEvent(
     client: PoolClient,
     userId: string,
@@ -1959,10 +2023,15 @@ export class CommandProcessor {
  * refusal (nothing was spent), so its reason is shown instead of a generic retry message. The reason is
  * gateway policy text (capability and config names), never provider output; it is still masked and capped.
  */
-export function brainFailureMessage(cause: unknown, options: { answeringAsk?: boolean } = {}): string {
-  const retry = options.answeringAsk
-    ? ' Your answer was not recorded; the card is still open, so you can answer it again.'
-    : ' Please try again.';
+export function brainFailureMessage(
+  cause: unknown,
+  options: { answeringAsk?: boolean; askClosed?: boolean } = {}
+): string {
+  const retry = options.askClosed
+    ? ' This request is closed because the run behind it has ended; nothing more will run from it.'
+    : options.answeringAsk
+      ? ' Your answer was not recorded; the card is still open, so you can answer it again.'
+      : ' Please try again.';
   if (!(cause instanceof GatewayClientError)) return `Failed to process command.${retry}`;
   const reason = safeReason(cause.message);
   switch (cause.code) {
@@ -1992,4 +2061,18 @@ function safeReason(message: string): string {
     .trim()
     .replace(/\.$/, '')
     .slice(0, 400);
+}
+
+/** Gateway run statuses after which the run cannot continue from this ask. */
+const DEAD_RUN_STATUSES = new Set(['failed', 'ambiguous', 'cancelled', 'stopped']);
+
+/**
+ * True when answering the same ask again cannot succeed: the gateway no longer holds the
+ * approval, or the run behind it finished in a failed/ambiguous state. A blocked run, a
+ * timeout or an unreachable gateway stays retryable.
+ */
+export function isTerminalBrainFailure(cause: unknown): boolean {
+  if (!(cause instanceof GatewayClientError)) return false;
+  if (cause.code === 'approval_expired' || cause.code === 'approval_mismatch') return true;
+  return cause.runStatus !== undefined && DEAD_RUN_STATUSES.has(cause.runStatus);
 }
