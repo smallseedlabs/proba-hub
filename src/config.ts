@@ -170,7 +170,7 @@ export const config = {
      */
     limits: {
       /** Cap on the tokens of one model answer. Planning and drafting need headroom; tighten-only via BRAIN_MAX_OUTPUT_TOKENS. */
-      maxOutputTokens: envInt('BRAIN_MAX_OUTPUT_TOKENS', 4000),
+      maxOutputTokens: envInt('BRAIN_MAX_OUTPUT_TOKENS', 8000),
       /** Tool calls kept from one answer; the rest are dropped. */
       maxToolCallsPerTurn: envInt('BRAIN_MAX_TOOL_CALLS', 2),
       /** Spend one tool call may propose (costImpact.proposed). */
