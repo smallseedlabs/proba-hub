@@ -1446,6 +1446,25 @@ export class AnalyticsService {
       [goalId, userId, nextStatus]
     );
 
+    try {
+      const seqRes = await pool.query<{ seq: number }>('SELECT get_next_event_seq($1) as seq', [userId]);
+      const seq = seqRes.rows[0]?.seq;
+      if (seq !== undefined) {
+        const evRes = await pool.query<{ id: string }>(
+          `INSERT INTO events (user_id, seq, type, thread_id, payload, fallback_text)
+           VALUES ($1, $2, 'goal_updated', $3, $4::jsonb, $5)
+           RETURNING id`,
+          [userId, seq, goal.thread_id, JSON.stringify({ goalId, status: nextStatus }), `${goal.title} (${nextStatus})`]
+        );
+        const eventId = evRes.rows[0]?.id;
+        if (eventId) {
+          await pool.query('INSERT INTO outbox (user_id, event_id) VALUES ($1, $2)', [userId, eventId]);
+        }
+      }
+    } catch {
+      // Best-effort live UI stream notification; DB goal status is already updated.
+    }
+
     await this.options.audit.emit(
       {
         action: 'goal.status_changed',
