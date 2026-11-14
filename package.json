@@ -44,7 +44,7 @@
     "@smallseedlabs/proba-protocol": "github:smallseedlabs/proba-protocol#298eeb4b4ba3fe14b4bf5077810ce2f433067984",
     "dotenv": "^16.4.5",
     "fastify": "^5.12.8",
-    "jose": "^6.2.14",
+    "jose": "^6.2.15",
     "js-yaml": "^4.1.0",
     "pg": "^8.12.0",
     "pino": "^9.3.2",
