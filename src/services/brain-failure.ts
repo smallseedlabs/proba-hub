@@ -24,8 +24,7 @@ export function brainFailureMessage(
   switch (cause.code) {
     case 'preflight_blocked':
     case 'budget_exhausted':
-      if (reason) return `Proba could not start this step (nothing was spent): ${reason}`;
-      break;
+      return preflightBlockedMessage(reason);
     case 'policy_denied':
       return `Proba stopped this step because a tool request was refused by policy (nothing was spent)${reason ? `: ${reason}.` : '.'}${retry}`;
     case 'idempotency_conflict':
@@ -38,6 +37,60 @@ export function brainFailureMessage(
       return `Proba's planner could not be reached (nothing was spent).${retry}`;
   }
   return `Failed to process command.${retry}`;
+}
+
+/** User-facing copy for a preflight/guardrail block: why, what unblocks it, and the next step. */
+export function preflightBlockedMessage(reason: string): string {
+  if (!reason) {
+    return 'This step is blocked by a preflight check. Fix that, then press Retry. Nothing was spent.';
+  }
+  if (/press Retry/i.test(reason)) {
+    return reason.endsWith('.') ? reason : `${reason}.`;
+  }
+  if (/billing-eligible|insufficient provider funds/i.test(reason)) {
+    return (
+      'Campaign creation is blocked because your Reddit Ads wallet is not funded. ' +
+      'Add funds to your Reddit Ads wallet, then press Retry. Nothing was spent.'
+    );
+  }
+  if (/not verified|provider balance is not verified|provider billing/i.test(reason)) {
+    return (
+      'Campaign creation is blocked because Proba could not verify billing on the ad account. ' +
+      'Check the Ads connection and billing, then press Retry. Nothing was spent.'
+    );
+  }
+  return `This step is blocked: ${reason}. Fix that, then press Retry. Nothing was spent.`;
+}
+
+export interface BrainFailureEventExtra {
+  askId?: string;
+  retryable: boolean;
+  retryAction?: boolean;
+  blocked?: boolean;
+}
+
+/**
+ * Fields on the thread error event. `retryable` still means "the same ask can be
+ * answered again". `retryAction` means a new Retry button should start a fresh
+ * step (for example after funding the ads wallet when the previous approval was
+ * already used).
+ */
+export function brainFailureEventExtra(
+  cause: unknown,
+  options: { askId?: string; askClosed?: boolean } = {}
+): BrainFailureEventExtra {
+  const closed = options.askClosed === true;
+  const gatewayRetryable = cause instanceof GatewayClientError && cause.retryable === true;
+  const blocked =
+    cause instanceof GatewayClientError &&
+    (cause.code === 'preflight_blocked' || cause.code === 'budget_exhausted' || cause.runStatus === 'blocked');
+  const retryAction = gatewayRetryable && (closed || !options.askId);
+  return {
+    ...(options.askId ? { askId: options.askId } : {}),
+    retryable: !closed,
+    ...(retryAction ? { retryAction: true } : {}),
+    ...(blocked ? { blocked: true } : {}),
+  };
 }
 
 /** Gateway reasons are policy/config text, never provider output; still masked, collapsed and capped. */

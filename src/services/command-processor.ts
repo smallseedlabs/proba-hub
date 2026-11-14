@@ -4,7 +4,7 @@ import { transaction } from '../db/client.js';
 import { logger } from '../logger.js';
 import { DEFAULT_WORKSPACE_ID } from '../config.js';
 import { reservePendingGoal } from './internal-reads.js';
-import { brainFailureMessage, isTerminalBrainFailure } from './brain-failure.js';
+import { brainFailureEventExtra, brainFailureMessage, isTerminalBrainFailure } from './brain-failure.js';
 
 export { brainFailureMessage, isTerminalBrainFailure };
 import { kickOutboxRelay } from './outbox-relay.js';
@@ -371,7 +371,8 @@ export class CommandProcessor {
           userId,
           envelope.threadId,
           'brain_error',
-          brainFailureMessage(cause)
+          brainFailureMessage(cause),
+          brainFailureEventExtra(cause)
         );
         
         await this.addToOutbox(client, userId, errorEvent.id);
@@ -2118,7 +2119,7 @@ export class CommandProcessor {
       envelope.threadId,
       'brain_error',
       brainFailureMessage(cause, { answeringAsk: true, askClosed: closed }),
-      { ...(askId ? { askId } : {}), retryable: !closed }
+      brainFailureEventExtra(cause, { ...(askId ? { askId } : {}), askClosed: closed })
     );
     await this.addToOutbox(client, scope.userId, errorEvent.id);
     events.push(errorEvent);
@@ -2160,7 +2161,7 @@ export class CommandProcessor {
     threadId: string | undefined,
     code: string,
     message: string,
-    extra: { askId?: string; retryable?: boolean } = {}
+    extra: { askId?: string; retryable?: boolean; retryAction?: boolean; blocked?: boolean } = {}
   ): Promise<Event> {
     const seq = await this.getNextSeq(client, userId);
     
