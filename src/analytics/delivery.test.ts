@@ -193,4 +193,57 @@ describe('deriveProviderDeliveryStatus', () => {
       conversions: 3,
     });
   });
+
+  it('resolves Meta campaign delivery status and insights metrics', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('/meta_cmp_1/ads')) {
+        return new Response(
+          JSON.stringify({ data: [{ effective_status: 'ACTIVE', preview_shareable_link: 'https://fb.me/preview1' }] }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/meta_cmp_1/insights')) {
+        return new Response(
+          JSON.stringify({
+            data: [{ impressions: '2000', clicks: '50', spend: '12.50', reach: '1500', frequency: '1.33', actions: [{ action_type: 'link_click', value: '50' }] }],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes('/meta_cmp_1')) {
+        return new Response(
+          JSON.stringify({ id: 'meta_cmp_1', status: 'ACTIVE', effective_status: 'ACTIVE' }),
+          { status: 200 }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const resolver = new HubCampaignDeliveryResolver({
+      connections: {
+        issueAccessToken: async () => ({ accessToken: 'meta_tok', accountId: 'act_123' }),
+      } as never,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const status = await resolver.resolve({
+      workspaceId: 'ws_1',
+      userId: 'u_1',
+      probaCampaignId: 'pc_meta_1',
+      platform: 'meta',
+      accountId: 'act_123',
+      providerCampaignId: 'meta_cmp_1',
+    });
+
+    expect(status?.state).toBe('delivering');
+    expect(status?.previewUrl).toBe('https://fb.me/preview1');
+    expect(status?.nativeMetrics).toMatchObject({
+      impressions: 2000,
+      clicks: 50,
+      spend: 12.5,
+      reach: 1500,
+      frequency: 1.33,
+      conversions: 50,
+    });
+  });
 });

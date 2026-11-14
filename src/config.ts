@@ -285,6 +285,13 @@ export const config = {
       oauthBaseUrl: (process.env.HUB_REDDIT_OAUTH_BASE_URL || 'https://www.reddit.com').trim(),
       adsApiBaseUrl: (process.env.HUB_REDDIT_ADS_API_BASE_URL || 'https://ads-api.reddit.com/api/v3').trim(),
     },
+    meta: {
+      clientIdFile: (process.env.HUB_META_CLIENT_ID_FILE || '').trim(),
+      clientSecretFile: (process.env.HUB_META_CLIENT_SECRET_FILE || '').trim(),
+      redirectUri: (process.env.HUB_META_REDIRECT_URI || '').trim(),
+      oauthBaseUrl: (process.env.HUB_META_OAUTH_BASE_URL || 'https://www.facebook.com').trim(),
+      graphApiBaseUrl: (process.env.HUB_META_GRAPH_API_BASE_URL || 'https://graph.facebook.com/v21.0').trim(),
+    },
   },
 
   /** Audit trail (protocol AuditEvent) through the transactional outbox. */

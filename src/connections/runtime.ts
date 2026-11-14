@@ -5,6 +5,7 @@ import { loadPublicKeySet } from '../auth/assertions/public-key-set.js';
 import { logger } from '../logger.js';
 import { loadTokenCipher } from './crypto.js';
 import type { ConnectionProviderAdapter, ConnectionProviderId } from './provider.js';
+import { MetaConnectionAdapter } from './meta.js';
 import { RedditConnectionAdapter } from './reddit.js';
 import { ConnectionsService } from './service.js';
 import { AdsServiceTokenVerifier } from './service-token.js';
@@ -66,6 +67,17 @@ export async function createConnectionsRuntime(): Promise<ConnectionsRuntime | n
     redirectUris.reddit = checkRedirectUri(c.reddit.redirectUri);
   } else if (!config.isTest) {
     logger.info('Reddit connection is off: set HUB_REDDIT_CLIENT_ID_FILE, HUB_REDDIT_CLIENT_SECRET_FILE and HUB_REDDIT_REDIRECT_URI');
+  }
+  if (c.meta.clientIdFile && c.meta.clientSecretFile && c.meta.redirectUri) {
+    providers.meta = new MetaConnectionAdapter({
+      clientId: readSecretFile('HUB_META_CLIENT_ID_FILE', c.meta.clientIdFile),
+      clientSecret: readSecretFile('HUB_META_CLIENT_SECRET_FILE', c.meta.clientSecretFile),
+      oauthBaseUrl: checkBase('HUB_META_OAUTH_BASE_URL', c.meta.oauthBaseUrl),
+      graphApiBaseUrl: checkBase('HUB_META_GRAPH_API_BASE_URL', c.meta.graphApiBaseUrl),
+    });
+    redirectUris.meta = checkRedirectUri(c.meta.redirectUri);
+  } else if (!config.isTest) {
+    logger.info('Meta connection is off: set HUB_META_CLIENT_ID_FILE, HUB_META_CLIENT_SECRET_FILE and HUB_META_REDIRECT_URI');
   }
   const service = new ConnectionsService({
     workspaceId: config.audit.workspaceId,

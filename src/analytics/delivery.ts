@@ -1,5 +1,6 @@
 import type { ConnectionsService } from '../connections/service.js';
 import { PROVIDER_DISPLAY_NAMES, type ConnectionProviderId } from '../connections/provider.js';
+import { META_GRAPH_API_BASE } from '../connections/meta.js';
 import { REDDIT_ADS_API_BASE } from '../connections/reddit.js';
 import type { AdPlatform } from './service.js';
 
@@ -486,6 +487,29 @@ export class HubCampaignDeliveryResolver implements CampaignDeliveryResolver {
       };
     }
 
+    if (input.platform === 'meta') {
+      try {
+        const status = await this.resolveMetaDelivery(issued.accessToken, input.providerCampaignId, checkedAt);
+        this.cache.set(cacheKey, { status, expiresAt: now.getTime() + this.cacheTtlMs });
+        return status;
+      } catch {
+        return {
+          state: 'unknown',
+          label: 'Status check unavailable',
+          summary: `Could not reach ${providerName} to verify live delivery status right now.`,
+          causes: [],
+          campaignConfiguredStatus: null,
+          campaignEffectiveStatus: null,
+          adGroupEffectiveStatus: null,
+          adEffectiveStatus: null,
+          rejectionReason: null,
+          postUrl: null,
+          previewUrl: null,
+          checkedAt,
+        };
+      }
+    }
+
     if (input.platform !== 'reddit') {
       return {
         state: 'unknown',
@@ -673,11 +697,146 @@ export class HubCampaignDeliveryResolver implements CampaignDeliveryResolver {
     return body.data.filter((item): item is RedditEntityRecord => Boolean(item && typeof item === 'object'));
   }
 
+  private async resolveMetaDelivery(
+    accessToken: string,
+    campaignId: string,
+    checkedAt: string
+  ): Promise<CampaignDeliveryStatus> {
+    const headers = {
+      authorization: `Bearer ${accessToken}`,
+      accept: 'application/json',
+    };
+    const [campRes, adsRes, insightsRes] = await Promise.all([
+      this.fetchImpl(
+        `${META_GRAPH_API_BASE}/${encodeURIComponent(campaignId)}?fields=id,status,effective_status,issues_info`,
+        { method: 'GET', headers, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs) }
+      ),
+      this.fetchImpl(
+        `${META_GRAPH_API_BASE}/${encodeURIComponent(campaignId)}/ads?fields=id,status,effective_status,preview_shareable_link,issues_info&limit=10`,
+        { method: 'GET', headers, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs) }
+      ).catch(() => null),
+      this.fetchImpl(
+        `${META_GRAPH_API_BASE}/${encodeURIComponent(campaignId)}/insights?fields=impressions,clicks,spend,reach,frequency,ctr,cpc,cpm,actions&date_preset=last_14d`,
+        { method: 'GET', headers, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs) }
+      ).catch(() => null),
+    ]);
+
+    if (!campRes.ok) {
+      throw new Error(`Meta campaign lookup failed: ${campRes.status}`);
+    }
+    const camp = (await campRes.json().catch(() => null)) as {
+      status?: string;
+      effective_status?: string;
+      issues_info?: Array<{ error_summary?: string; error_message?: string }>;
+    } | null;
+    const adsBody = adsRes?.ok
+      ? ((await adsRes.json().catch(() => null)) as {
+          data?: Array<{
+            effective_status?: string;
+            preview_shareable_link?: string;
+            issues_info?: Array<{ error_summary?: string; error_message?: string }>;
+          }>;
+        } | null)
+      : null;
+    const primaryAd = adsBody?.data?.[0];
+
+    const campConfigured = normUpper(camp?.status);
+    const campEffective = normUpper(camp?.effective_status);
+    const adEffective = normUpper(primaryAd?.effective_status);
+    const issues = [
+      ...(camp?.issues_info ?? []),
+      ...(primaryAd?.issues_info ?? []),
+    ]
+      .map((i) => strOrNull(i.error_summary) || strOrNull(i.error_message))
+      .filter((x): x is string => Boolean(x));
+    const causes = [...new Set(issues)];
+
+    let nativeMetrics: Record<string, number> | null = null;
+    if (insightsRes?.ok) {
+      const insBody = (await insightsRes.json().catch(() => null)) as {
+        data?: Array<Record<string, unknown>>;
+      } | null;
+      const row = insBody?.data?.[0];
+      if (row) {
+        const impressions = Number(row.impressions ?? 0) || 0;
+        const clicks = Number(row.clicks ?? 0) || 0;
+        const spend = Number(row.spend ?? 0) || 0;
+        const reach = Number(row.reach ?? 0) || 0;
+        const frequency = Number(row.frequency ?? 0) || 0;
+        const ctr = Number(row.ctr ?? (impressions > 0 ? (clicks / impressions) * 100 : 0)) || 0;
+        const cpc = Number(row.cpc ?? (clicks > 0 ? spend / clicks : 0)) || 0;
+        const ecpm = Number(row.cpm ?? (impressions > 0 ? (spend / impressions) * 1000 : 0)) || 0;
+        const actions = Array.isArray(row.actions) ? (row.actions as Array<{ action_type?: string; value?: string }>) : [];
+        const conversions = actions.reduce((acc, a) => acc + (Number(a.value ?? 0) || 0), 0);
+        nativeMetrics = { impressions, clicks, spend, reach, frequency, ctr, cpc, ecpm, conversions };
+      }
+    }
+
+    const previewUrl = strOrNull(primaryAd?.preview_shareable_link);
+    const isRejected = campEffective === 'DISAPPROVED' || adEffective === 'DISAPPROVED';
+    const isPaused =
+      campConfigured === 'PAUSED' ||
+      campEffective === 'PAUSED' ||
+      campEffective === 'CAMPAIGN_PAUSED' ||
+      adEffective === 'PAUSED' ||
+      adEffective === 'ADSET_PAUSED' ||
+      adEffective === 'CAMPAIGN_PAUSED';
+    const isModeration =
+      campEffective === 'PENDING_REVIEW' ||
+      campEffective === 'IN_PROCESS' ||
+      adEffective === 'PENDING_REVIEW' ||
+      adEffective === 'IN_PROCESS';
+
+    let state: CampaignDeliveryState = 'unknown';
+    let label = 'Status unknown';
+    let summary = `Meta Ads reported campaign status ${campEffective ?? campConfigured ?? 'unknown'}.`;
+
+    if (isRejected) {
+      state = 'rejected';
+      label = 'Rejected by moderation';
+      summary = causes[0]
+        ? `Meta Ads rejected the ad creative: ${causes[0]}`
+        : 'Meta Ads rejected the ad creative during policy review.';
+    } else if (isPaused) {
+      state = 'paused';
+      label = isModeration ? 'Paused · In review' : 'Paused';
+      summary = 'Campaign is paused on Meta Ads and is not serving impressions.';
+    } else if (isModeration) {
+      state = 'in_moderation';
+      label = 'In review';
+      summary = 'Ad is in Meta Ads policy review. Delivery starts automatically once approved.';
+    } else if (campEffective === 'WITH_ISSUES' || adEffective === 'WITH_ISSUES' || causes.length > 0) {
+      state = 'not_delivering';
+      label = 'Not delivering · Issues';
+      summary = causes[0] ? `Meta Ads delivery issue: ${causes[0]}` : 'Meta Ads reported delivery issues.';
+    } else if (campEffective === 'ACTIVE' && (!adEffective || adEffective === 'ACTIVE')) {
+      state = 'delivering';
+      label = 'Active · Delivering';
+      summary = 'Campaign and ad creative are approved and actively delivering on Meta Ads.';
+    }
+
+    return {
+      state,
+      label,
+      summary,
+      causes,
+      campaignConfiguredStatus: campConfigured,
+      campaignEffectiveStatus: campEffective,
+      adGroupEffectiveStatus: null,
+      adEffectiveStatus: adEffective,
+      rejectionReason: isRejected ? (causes[0] ?? null) : null,
+      postUrl: null,
+      previewUrl,
+      nativeMetrics,
+      checkedAt,
+    };
+  }
+
   /**
    * Emergency-stop pause for a live provider campaign and its ads. Clears cached delivery status.
    */
   async pauseCampaign(input: ResolveCampaignDeliveryInput): Promise<{ ok: boolean; adsPaused: number; error?: string }> {
-    if (!input.providerCampaignId || !this.options.connections || input.platform !== 'reddit') {
+    if (!input.providerCampaignId || !this.options.connections || (input.platform !== 'reddit' && input.platform !== 'meta')) {
       return { ok: false, adsPaused: 0, error: 'unsupported_or_missing_campaign' };
     }
     const cacheKey = `${input.workspaceId}:${input.platform}:${input.providerCampaignId}`;
@@ -685,11 +844,28 @@ export class HubCampaignDeliveryResolver implements CampaignDeliveryResolver {
     try {
       const issued = await this.options.connections.issueAccessToken({
         workspaceId: input.workspaceId,
-        provider: 'reddit',
+        provider: input.platform as ConnectionProviderId,
         purpose: 'mutate',
         userId: input.userId,
         initiatedBy: 'user',
       });
+      if (input.platform === 'meta') {
+        const res = await this.fetchImpl(
+          `${META_GRAPH_API_BASE}/${encodeURIComponent(input.providerCampaignId)}`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${issued.accessToken}`,
+              'content-type': 'application/json',
+              accept: 'application/json',
+            },
+            body: JSON.stringify({ status: 'PAUSED' }),
+            redirect: 'error',
+            signal: AbortSignal.timeout(this.timeoutMs),
+          }
+        );
+        return { ok: res.ok, adsPaused: res.ok ? 1 : 0 };
+      }
       const campRes = await this.patchObject(
         issued.accessToken,
         `/campaigns/${encodeURIComponent(input.providerCampaignId)}`,
