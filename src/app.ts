@@ -18,6 +18,7 @@ import { AnalyticsService } from './analytics/service.js';
 import { HubCampaignDeliveryResolver } from './analytics/delivery.js';
 import { startAnalyticsScheduler, stopAnalyticsScheduler } from './analytics/scheduler.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { assetRoutes } from './routes/assets.js';
 import { brokerRoutes, connectionRoutes } from './routes/connections.js';
 import { createConnectionsRuntime, type ConnectionsRuntime } from './connections/runtime.js';
 import { getAudit } from './audit/service.js';
@@ -164,6 +165,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   await fastify.register(readRoutes, { prefix: '/v1' });
 
   await fastify.register(analyticsRoutes, { prefix: '/v1', service: analytics, workspaceId: config.audit.workspaceId });
+  await fastify.register(assetRoutes, { prefix: '/v1', workspaceId: config.audit.workspaceId });
 
   await fastify.register(connectionRoutes, { prefix: '/v1', service: connections?.service ?? null });
   if (connections?.adsVerifier) {

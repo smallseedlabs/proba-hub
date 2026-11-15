@@ -1661,6 +1661,45 @@ export class CommandProcessor {
       [toJsonb(creative), threadId, scope.userId, extra.targeting ? toJsonb(extra.targeting) : null, extra.plan ? toJsonb(extra.plan) : null]
     );
     const goalId = updated.rows[0]?.id;
+    const rawCreative = creative as unknown as Record<string, unknown>;
+    const mediaUrls: Array<{ kind: 'image' | 'video'; url: string }> = [];
+    const imgCandidate =
+      typeof rawCreative.imageUrl === 'string'
+        ? rawCreative.imageUrl.trim()
+        : creative.type === 'IMAGE' && typeof rawCreative.mediaUrl === 'string'
+          ? rawCreative.mediaUrl.trim()
+          : '';
+    if (imgCandidate) {
+      mediaUrls.push({ kind: 'image', url: imgCandidate });
+    }
+    const vidCandidate = typeof rawCreative.videoUrl === 'string' ? rawCreative.videoUrl.trim() : '';
+    if (vidCandidate) {
+      mediaUrls.push({ kind: 'video', url: vidCandidate });
+    }
+    for (const m of mediaUrls) {
+      const provider = m.url.includes('fal.media') || m.url.includes('fal.run')
+        ? 'fal'
+        : m.url.includes('pexels.com')
+          ? 'pexels'
+          : 'landing_page';
+      await client.query(
+        `INSERT INTO creative_assets (id, workspace_id, user_id, goal_id, kind, url, provider, metadata)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb
+         WHERE NOT EXISTS (
+           SELECT 1 FROM creative_assets WHERE workspace_id = $2 AND user_id = $3 AND url = $6
+         )`,
+        [
+          `ast_${randomUUID()}`,
+          DEFAULT_WORKSPACE_ID,
+          scope.userId,
+          goalId ?? null,
+          m.kind,
+          m.url,
+          provider,
+          JSON.stringify({ source: 'approved_creative', askId }),
+        ]
+      );
+    }
     await getAudit().emit(
       {
         action: 'goal.updated',
