@@ -456,7 +456,17 @@ function outputsOf(snapshot: GatewayRunSnapshot): BrainOutput[] {
       ...(researchReview && verb === RESEARCH_ACCEPT_VERB ? { researchReview } : {}),
     } as BrainOutput);
   }
-  return outputs;
+  const seenReplies = new Set<string>();
+  const deduped = outputs.filter((item) => {
+    if (item.type !== 'reply') return true;
+    const rawText = (item as { text?: unknown; content?: unknown }).text ?? (item as { content?: unknown }).content;
+    const key = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!key) return false;
+    if (seenReplies.has(key)) return false;
+    seenReplies.add(key);
+    return true;
+  });
+  return deduped;
 }
 
 function firstApprovalVerb(snapshot: GatewayRunSnapshot): string {
