@@ -1661,6 +1661,38 @@ export class CommandProcessor {
       [toJsonb(creative), threadId, scope.userId, extra.targeting ? toJsonb(extra.targeting) : null, extra.plan ? toJsonb(extra.plan) : null]
     );
     const goalId = updated.rows[0]?.id;
+    if (goalId) {
+      const platform =
+        typeof extra.plan?.platform === 'string' && extra.plan.platform.trim()
+          ? extra.plan.platform.trim().toLowerCase()
+          : 'reddit';
+      try {
+        const prev = await client.query<{ id: string; max_ver: number }>(
+          `SELECT id, version as max_ver FROM goal_creative_variants
+           WHERE goal_id = $1 AND platform = $2 ORDER BY version DESC LIMIT 1`,
+          [goalId, platform]
+        );
+        const nextVersion = (prev.rows[0]?.max_ver ?? 0) + 1;
+        const parentId = prev.rows[0]?.id ?? null;
+        await client.query(
+          `INSERT INTO goal_creative_variants
+             (workspace_id, user_id, goal_id, platform, version, parent_variant_id, status, mode, creative_json, targeting_json)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active', 'initial', $7::jsonb, $8::jsonb)`,
+          [
+            DEFAULT_WORKSPACE_ID,
+            scope.userId,
+            goalId,
+            platform,
+            nextVersion,
+            parentId,
+            JSON.stringify(creative),
+            extra.targeting ? JSON.stringify(extra.targeting) : null,
+          ]
+        );
+      } catch {
+        // Keep backwards compatibility if migration 016 is not yet applied in isolated unit DBs.
+      }
+    }
     const rawCreative = creative as unknown as Record<string, unknown>;
     const mediaUrls: Array<{ kind: 'image' | 'video'; url: string }> = [];
     const imgCandidate =

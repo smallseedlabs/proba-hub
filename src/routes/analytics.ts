@@ -317,6 +317,187 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Per-platform creative variants & v1 -> v2 enhancement / winner promotion
+  fastify.get<{ Params: { goalId: string } }>(
+    '/goals/:goalId/creatives',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      try {
+        const rows = await pool.query(
+          `SELECT id, goal_id as "goalId", platform, version, parent_variant_id as "parentVariantId",
+                  proba_campaign_id as "probaCampaignId", provider_ad_id as "providerAdId",
+                  status, mode, change_reason as "changeReason", creative_json as "creative",
+                  targeting_json as "targeting", metrics_json as "metrics",
+                  created_at as "createdAt", updated_at as "updatedAt"
+           FROM goal_creative_variants
+           WHERE goal_id = $1 AND user_id = $2
+           ORDER BY platform ASC, version DESC`,
+          [request.params.goalId, request.user!.id]
+        );
+        return reply.send({ variants: rows.rows });
+      } catch {
+        return reply.send({ variants: [] });
+      }
+    }
+  );
+
+  fastify.post<{
+    Params: { goalId: string; variantId: string };
+    Body: {
+      mode: 'ab_test' | 'replace';
+      headline?: string;
+      body?: string;
+      imageUrl?: string;
+      videoUrl?: string;
+      ctaType?: string;
+      changeReason?: string;
+    };
+  }>(
+    '/goals/:goalId/creatives/:variantId/enhance',
+    {
+      onRequest: [fastify.authenticate],
+      schema: {
+        params: { type: 'object', properties: { goalId: uuid, variantId: uuid } },
+        body: {
+          type: 'object',
+          required: ['mode'],
+          properties: {
+            mode: { type: 'string', enum: ['ab_test', 'replace'] },
+            headline: { type: 'string', maxLength: 300 },
+            body: { type: 'string', maxLength: 5000 },
+            imageUrl: { type: 'string', maxLength: 2048 },
+            videoUrl: { type: 'string', maxLength: 2048 },
+            ctaType: { type: 'string', maxLength: 64 },
+            changeReason: { type: 'string', maxLength: 500 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id;
+      const result = await transaction(async (client) => {
+        const parentRes = await client.query<{
+          id: string;
+          workspace_id: string;
+          platform: string;
+          version: number;
+          proba_campaign_id: string | null;
+          creative_json: Record<string, unknown>;
+          targeting_json: Record<string, unknown> | null;
+        }>(
+          `SELECT id, workspace_id, platform, version, proba_campaign_id, creative_json, targeting_json
+           FROM goal_creative_variants
+           WHERE id = $1 AND goal_id = $2 AND user_id = $3`,
+          [request.params.variantId, request.params.goalId, userId]
+        );
+        const parent = parentRes.rows[0];
+        if (!parent) return undefined;
+
+        const maxRes = await client.query<{ max_ver: number }>(
+          `SELECT COALESCE(MAX(version), 0) as max_ver FROM goal_creative_variants WHERE goal_id = $1 AND platform = $2`,
+          [request.params.goalId, parent.platform]
+        );
+        const nextVersion = Number(maxRes.rows[0]?.max_ver ?? parent.version) + 1;
+
+        const nextCreative: Record<string, unknown> = {
+          ...parent.creative_json,
+          ...(request.body.headline !== undefined ? { headline: request.body.headline } : {}),
+          ...(request.body.body !== undefined ? { body: request.body.body } : {}),
+          ...(request.body.imageUrl !== undefined ? { imageUrl: request.body.imageUrl } : {}),
+          ...(request.body.videoUrl !== undefined ? { videoUrl: request.body.videoUrl } : {}),
+          ...(request.body.ctaType !== undefined ? { ctaType: request.body.ctaType } : {}),
+        };
+        if (nextCreative.imageUrl && nextCreative.type === 'TEXT') {
+          nextCreative.type = 'IMAGE';
+          nextCreative.mediaUrl = nextCreative.imageUrl;
+        }
+
+        const nextStatus = request.body.mode === 'ab_test' ? 'testing' : 'active';
+        if (request.body.mode === 'replace') {
+          await client.query(
+            `UPDATE goal_creative_variants SET status = 'paused', updated_at = NOW()
+             WHERE goal_id = $1 AND platform = $2 AND status IN ('active', 'testing', 'winner')`,
+            [request.params.goalId, parent.platform]
+          );
+        }
+
+        const inserted = await client.query(
+          `INSERT INTO goal_creative_variants
+             (workspace_id, user_id, goal_id, platform, version, parent_variant_id, proba_campaign_id, status, mode, change_reason, creative_json, targeting_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)
+           RETURNING id, goal_id as "goalId", platform, version, parent_variant_id as "parentVariantId",
+                     proba_campaign_id as "probaCampaignId", provider_ad_id as "providerAdId",
+                     status, mode, change_reason as "changeReason", creative_json as "creative",
+                     targeting_json as "targeting", metrics_json as "metrics",
+                     created_at as "createdAt", updated_at as "updatedAt"`,
+          [
+            parent.workspace_id,
+            userId,
+            request.params.goalId,
+            parent.platform,
+            nextVersion,
+            parent.id,
+            parent.proba_campaign_id,
+            nextStatus,
+            request.body.mode,
+            request.body.changeReason ?? null,
+            JSON.stringify(nextCreative),
+            parent.targeting_json ? JSON.stringify(parent.targeting_json) : null,
+          ]
+        );
+
+        await client.query(
+          `UPDATE goals SET approved_creative = $3::jsonb, creative_approved_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND user_id = $2`,
+          [request.params.goalId, userId, JSON.stringify(nextCreative)]
+        );
+
+        return inserted.rows[0];
+      });
+      if (!result) return reply.code(404).send({ error: 'variant_not_found' });
+      return reply.status(201).send({ variant: result });
+    }
+  );
+
+  fastify.post<{ Params: { goalId: string; variantId: string } }>(
+    '/goals/:goalId/creatives/:variantId/promote',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid, variantId: uuid } } } },
+    async (request, reply) => {
+      const userId = request.user!.id;
+      const promoted = await transaction(async (client) => {
+        const targetRes = await client.query<{ id: string; platform: string; creative_json: Record<string, unknown> }>(
+          `SELECT id, platform, creative_json FROM goal_creative_variants WHERE id = $1 AND goal_id = $2 AND user_id = $3`,
+          [request.params.variantId, request.params.goalId, userId]
+        );
+        const target = targetRes.rows[0];
+        if (!target) return undefined;
+
+        await client.query(
+          `UPDATE goal_creative_variants SET status = 'paused', updated_at = NOW()
+           WHERE goal_id = $1 AND platform = $2 AND id <> $3 AND status IN ('active', 'testing', 'winner')`,
+          [request.params.goalId, target.platform, target.id]
+        );
+        const updated = await client.query(
+          `UPDATE goal_creative_variants SET status = 'winner', updated_at = NOW()
+           WHERE id = $1
+           RETURNING id, goal_id as "goalId", platform, version, parent_variant_id as "parentVariantId",
+                     proba_campaign_id as "probaCampaignId", provider_ad_id as "providerAdId",
+                     status, mode, change_reason as "changeReason", creative_json as "creative",
+                     targeting_json as "targeting", metrics_json as "metrics",
+                     created_at as "createdAt", updated_at as "updatedAt"`,
+          [target.id]
+        );
+        await client.query(
+          `UPDATE goals SET approved_creative = $3::jsonb, updated_at = NOW() WHERE id = $1 AND user_id = $2`,
+          [request.params.goalId, userId, JSON.stringify(target.creative_json)]
+        );
+        return updated.rows[0];
+      });
+      if (!promoted) return reply.code(404).send({ error: 'variant_not_found' });
+      return reply.send({ variant: promoted });
+    }
+  );
+
   // Operator-approved creative/targeting for Reddit post creation on a goal.
   fastify.get<{ Params: { goalId: string } }>(
     '/goals/:goalId/creative',
