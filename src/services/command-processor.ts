@@ -1667,6 +1667,7 @@ export class CommandProcessor {
           ? extra.plan.platform.trim().toLowerCase()
           : 'reddit';
       try {
+        await client.query('SAVEPOINT sp_creative_variant');
         const prev = await client.query<{ id: string; max_ver: number }>(
           `SELECT id, version as max_ver FROM goal_creative_variants
            WHERE goal_id = $1 AND platform = $2 ORDER BY version DESC LIMIT 1`,
@@ -1689,7 +1690,9 @@ export class CommandProcessor {
             extra.targeting ? JSON.stringify(extra.targeting) : null,
           ]
         );
+        await client.query('RELEASE SAVEPOINT sp_creative_variant');
       } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_creative_variant').catch(() => {});
         // Keep backwards compatibility if migration 016 is not yet applied in isolated unit DBs.
       }
     }

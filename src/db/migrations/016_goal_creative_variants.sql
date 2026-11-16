@@ -1,7 +1,7 @@
 -- Per-platform, versioned creative variants per Goal (v1 -> v2 A/B test or replacement).
 CREATE TABLE IF NOT EXISTS goal_creative_variants (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL,
+  workspace_id TEXT NOT NULL,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
   platform TEXT NOT NULL,
