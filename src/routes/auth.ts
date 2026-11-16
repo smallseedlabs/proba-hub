@@ -49,10 +49,12 @@ export interface Workspace {
   name: string;
 }
 
+export type ProbaUserRole = 'operator' | 'instant_byo' | 'instant_managed';
+
 /** Response of POST /v1/auth/session (the contract proba-web expects). */
 export interface SessionResponse {
   token: string;
-  user: { id: string; email: string; name: string };
+  user: { id: string; email: string; name: string; role: ProbaUserRole };
   workspaces: Workspace[];
   expiresAt: string;
 }
@@ -88,8 +90,37 @@ export interface AuthRoutesOptions {
 export const DEFAULT_WORKSPACE: Workspace = { id: DEFAULT_WORKSPACE_ID, name: 'Seedbed' };
 export const DEFAULT_WORKSPACES: Workspace[] = [DEFAULT_WORKSPACE];
 
+function parseEmailSet(raw: string | undefined): Set<string> {
+  return new Set(
+    String(raw ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function isEmailAllowed(email: string | null | undefined): boolean {
+  const allowlist = parseEmailSet(process.env.HUB_ALLOWED_EMAILS);
+  if (allowlist.size === 0) return true;
+  if (!email) return false;
+  return allowlist.has(email.trim().toLowerCase());
+}
+
+function roleForEmail(email: string): ProbaUserRole {
+  const lower = email.trim().toLowerCase();
+  const operators = parseEmailSet(process.env.HUB_OPERATOR_EMAILS);
+  const managed = parseEmailSet(process.env.HUB_MANAGED_EMAILS);
+  if (operators.has(lower)) return 'operator';
+  if (managed.has(lower)) return 'instant_managed';
+  // If no role lists are configured (e.g. unit tests), default to operator for backwards compatibility.
+  if (operators.size === 0 && managed.size === 0 && parseEmailSet(process.env.HUB_ALLOWED_EMAILS).size === 0) {
+    return 'operator';
+  }
+  return 'instant_byo';
+}
+
 function toPublicUser(user: Pick<User, 'id' | 'email' | 'name'>) {
-  return { id: user.id, email: user.email, name: user.name };
+  return { id: user.id, email: user.email, name: user.name, role: roleForEmail(user.email) };
 }
 
 function tooManyAttempts(reply: FastifyReply, retryAfter: number) {
@@ -151,6 +182,23 @@ export async function authRoutes(fastify: FastifyInstance, opts: AuthRoutesOptio
 
       try {
         const identity = await verify(request.body.idToken);
+        if (!isEmailAllowed(identity.email)) {
+          failuresByIp.hit(ipKey);
+          logger.info({ ip: request.ip, email: identity.email }, 'Sign-in blocked: email not whitelisted');
+          await getAudit().emit({
+            action: 'auth.denied',
+            outcome: 'denied',
+            root: true,
+            actor: { type: 'system', id: 'anonymous' },
+            target: { type: 'route', id: 'POST /v1/auth/session' },
+            errorCode: 'access_not_enabled',
+            details: { method: 'firebase' },
+          });
+          return reply.code(403).send({
+            error: 'access_not_enabled',
+            message: 'Your email is authenticated, but pilot access is not enabled for this account yet.',
+          });
+        }
         const user = await resolveFirebaseUser(identity, { allowedEmailDomains: opts.allowedEmailDomains });
         const session = await issueAuditedSession(fastify, user.id, 'firebase', {
           provider: identity.signInProvider,
@@ -256,6 +304,12 @@ export async function devAuthRoutes(fastify: FastifyInstance) {
     },
     async (request, reply) => {
       const { email, name = 'Dev User' } = request.body;
+      if (!isEmailAllowed(email)) {
+        return reply.code(403).send({
+          error: 'access_not_enabled',
+          message: 'Your email is authenticated, but pilot access is not enabled for this account yet.',
+        });
+      }
 
       let user: User;
       const existing = await pool.query<User>(
