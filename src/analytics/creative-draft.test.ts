@@ -51,4 +51,18 @@ describe('plan card', () => {
     expect(planFromDraftAnswer(draft, { communities: 't5_x!' }).ok).toBe(false);
     expect(planFromDraftAnswer(draft, { successMetric: 'vibes' }).ok).toBe(false);
   });
+
+  it('preserves meta platform in planFrom and planFromDraftAnswer', async () => {
+    const { planFromDraftAnswer } = await import('./creative-draft.js');
+    const metaDraft = draftFromParameters({
+      ...params,
+      imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Studio.jpg',
+      plan: { platform: 'meta', successMetric: 'clicks', durationDays: 7, reasons: {} },
+    })!;
+    expect(metaDraft.plan?.platform).toBe('meta');
+    expect(planFromDraftAnswer(metaDraft, { successMetric: 'ctr' })).toMatchObject({
+      ok: true,
+      plan: { platform: 'meta', successMetric: 'ctr' },
+    });
+  });
 });

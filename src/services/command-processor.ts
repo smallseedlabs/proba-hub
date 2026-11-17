@@ -1717,23 +1717,29 @@ export class CommandProcessor {
         : m.url.includes('pexels.com')
           ? 'pexels'
           : 'landing_page';
-      await client.query(
-        `INSERT INTO creative_assets (id, workspace_id, user_id, goal_id, kind, url, provider, metadata)
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb
-         WHERE NOT EXISTS (
-           SELECT 1 FROM creative_assets WHERE workspace_id = $2 AND user_id = $3 AND url = $6
-         )`,
-        [
-          `ast_${randomUUID()}`,
-          DEFAULT_WORKSPACE_ID,
-          scope.userId,
-          goalId ?? null,
-          m.kind,
-          m.url,
-          provider,
-          JSON.stringify({ source: 'approved_creative', askId }),
-        ]
-      );
+      try {
+        await client.query('SAVEPOINT sp_creative_asset');
+        await client.query(
+          `INSERT INTO creative_assets (id, workspace_id, user_id, goal_id, kind, url, provider, metadata)
+           SELECT $1, $2, $3, $4, $5, $6, $7, $8::jsonb
+           WHERE NOT EXISTS (
+             SELECT 1 FROM creative_assets WHERE workspace_id = $2 AND user_id = $3 AND url = $6
+           )`,
+          [
+            `ast_${randomUUID()}`,
+            DEFAULT_WORKSPACE_ID,
+            scope.userId,
+            goalId ?? null,
+            m.kind,
+            m.url,
+            provider,
+            JSON.stringify({ source: 'approved_creative', askId }),
+          ]
+        );
+        await client.query('RELEASE SAVEPOINT sp_creative_asset');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_creative_asset').catch(() => {});
+      }
     }
     await getAudit().emit(
       {

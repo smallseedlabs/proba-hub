@@ -30,7 +30,7 @@ export interface CreativeDraft {
 export const SUCCESS_METRICS = ['clicks', 'ctr', 'cpc', 'landing_page_views', 'signups', 'conversions'] as const;
 
 export interface DraftPlan {
-  platform: 'reddit';
+  platform: 'reddit' | 'meta';
   successMetric: (typeof SUCCESS_METRICS)[number];
   successTarget?: number;
   durationDays?: number;
@@ -40,12 +40,14 @@ export interface DraftPlan {
 function planFrom(raw: unknown): DraftPlan | undefined {
   if (!isRecord(raw)) return undefined;
   if (typeof raw.successMetric !== 'string' || !(SUCCESS_METRICS as readonly string[]).includes(raw.successMetric)) return undefined;
+  const platform: DraftPlan['platform'] =
+    typeof raw.platform === 'string' && raw.platform.trim().toLowerCase() === 'meta' ? 'meta' : 'reddit';
   const reasons: Record<string, string> = {};
   if (isRecord(raw.reasons)) for (const [k, v] of Object.entries(raw.reasons).slice(0, 12)) if (typeof v === 'string') reasons[k.slice(0, 40)] = v.slice(0, 300);
   const target = typeof raw.successTarget === 'number' && Number.isFinite(raw.successTarget) && raw.successTarget > 0 ? raw.successTarget : undefined;
   const days = typeof raw.durationDays === 'number' && Number.isInteger(raw.durationDays) && raw.durationDays >= 1 && raw.durationDays <= 90 ? raw.durationDays : undefined;
   return {
-    platform: 'reddit',
+    platform,
     successMetric: raw.successMetric as DraftPlan['successMetric'],
     ...(target ? { successTarget: target } : {}),
     ...(days ? { durationDays: days } : {}),
@@ -121,7 +123,7 @@ export function planFromDraftAnswer(
     if (typeof metric !== 'string' || !(SUCCESS_METRICS as readonly string[]).includes(metric)) return { ok: false, error: 'unknown success metric' };
     const target = values.successTarget === undefined || values.successTarget === '' ? plan?.successTarget : Number(values.successTarget);
     if (target !== undefined && !(Number.isFinite(target) && target > 0)) return { ok: false, error: 'success target must be a positive number' };
-    plan = { platform: 'reddit', reasons: plan?.reasons ?? {}, ...(plan?.durationDays ? { durationDays: plan.durationDays } : {}), successMetric: metric as DraftPlan['successMetric'], ...(target ? { successTarget: target } : {}) };
+    plan = { platform: plan?.platform ?? 'reddit', reasons: plan?.reasons ?? {}, ...(plan?.durationDays ? { durationDays: plan.durationDays } : {}), successMetric: metric as DraftPlan['successMetric'], ...(target ? { successTarget: target } : {}) };
     edited = true;
   }
   return { ok: true, ...(targeting && Object.keys(targeting).length > 0 ? { targeting } : {}), ...(plan ? { plan } : {}), edited };
