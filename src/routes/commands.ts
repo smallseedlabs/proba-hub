@@ -133,69 +133,76 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
         body as { payload?: { approvalToken?: unknown } } | null
       )?.payload?.approvalToken;
 
-      if (envelope.type === 'answer_ask') {
-        const answerPayload = envelope.payload as { askId?: string; choice?: string };
-        if (answerPayload.choice === 'approve' && answerPayload.askId) {
-          const askResult = await pool.query<SpendAskRow>(
-            `SELECT a.id, a.ask_type, a.risk, a.cost_effect
-             FROM asks a
-             JOIN threads t ON t.id = a.thread_id
-             WHERE a.id = $1 AND t.user_id = $2`,
-            [answerPayload.askId, userId]
-          );
-          const askRow = askResult.rows[0];
-          if (askRow && isSpendAsk(askRow)) {
-            const verification = await verifyAndConsumeApprovalToken(pool, {
-              token: rawApprovalToken,
-              askId: askRow.id,
-              userId,
+      const verifySpendAskId =
+        envelope.type === 'answer_ask' &&
+        ((envelope.payload as { choice?: string }).choice === 'approve' ||
+          (envelope.payload as { choice?: string }).choice === 'edit')
+          ? (envelope.payload as { askId?: string }).askId
+          : envelope.type === 'approve_plan' &&
+              (envelope.payload as { approved?: boolean }).approved !== false
+            ? (envelope.payload as { planId?: string }).planId
+            : undefined;
+
+      if (typeof verifySpendAskId === 'string') {
+        const askResult = await pool.query<SpendAskRow>(
+          `SELECT a.id, a.ask_type, a.risk, a.cost_effect
+           FROM asks a
+           JOIN threads t ON t.id = a.thread_id
+           WHERE a.id = $1 AND t.user_id = $2`,
+          [verifySpendAskId, userId]
+        );
+        const askRow = askResult.rows[0];
+        if (askRow && isSpendAsk(askRow)) {
+          const verification = await verifyAndConsumeApprovalToken(pool, {
+            token: rawApprovalToken,
+            askId: askRow.id,
+            userId,
+          });
+          if (!verification.ok) {
+            await transaction(async (client) => {
+              const received = await audit.emit(
+                {
+                  action: 'command.received',
+                  outcome: 'success',
+                  root: true,
+                  userId,
+                  threadId: envelope.threadId,
+                  details: baseDetails,
+                },
+                { tx: client }
+              );
+              const parentSpanId = received?.spanId;
+              await audit.emit(
+                {
+                  action: 'approval.rejected',
+                  outcome: 'denied',
+                  userId,
+                  threadId: envelope.threadId,
+                  target: { type: 'ask', id: askRow.id },
+                  errorCode: verification.reason,
+                  parentSpanId,
+                  details: { askType: askRow.ask_type, reason: verification.reason },
+                },
+                { tx: client }
+              );
+              await audit.emit(
+                {
+                  action: 'command.rejected',
+                  outcome: 'denied',
+                  userId,
+                  threadId: envelope.threadId,
+                  errorCode: verification.reason,
+                  parentSpanId,
+                  details: { ...baseDetails, reason: verification.reason },
+                },
+                { tx: client }
+              );
             });
-            if (!verification.ok) {
-              await transaction(async (client) => {
-                const received = await audit.emit(
-                  {
-                    action: 'command.received',
-                    outcome: 'success',
-                    root: true,
-                    userId,
-                    threadId: envelope.threadId,
-                    details: baseDetails,
-                  },
-                  { tx: client }
-                );
-                const parentSpanId = received?.spanId;
-                await audit.emit(
-                  {
-                    action: 'approval.rejected',
-                    outcome: 'denied',
-                    userId,
-                    threadId: envelope.threadId,
-                    target: { type: 'ask', id: askRow.id },
-                    errorCode: verification.reason,
-                    parentSpanId,
-                    details: { askType: askRow.ask_type, reason: verification.reason },
-                  },
-                  { tx: client }
-                );
-                await audit.emit(
-                  {
-                    action: 'command.rejected',
-                    outcome: 'denied',
-                    userId,
-                    threadId: envelope.threadId,
-                    errorCode: verification.reason,
-                    parentSpanId,
-                    details: { ...baseDetails, reason: verification.reason },
-                  },
-                  { tx: client }
-                );
-              });
-              return reply.code(403).send({
-                status: 'rejected',
-                clientMsgId: envelope.clientMsgId,
-                reason: verification.reason,
-              });
-            }
+            return reply.code(403).send({
+              status: 'rejected',
+              clientMsgId: envelope.clientMsgId,
+              reason: verification.reason,
+            });
           }
         }
       }
