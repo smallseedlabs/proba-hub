@@ -345,6 +345,31 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Manual override: pause all live platform campaigns in the workspace (idempotent kill-switch).
+  fastify.post(
+    '/kill-switch',
+    { onRequest: [fastify.authenticate] },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      const userId = request.user!.id;
+      try {
+        const result = await service.emergencyPauseAll(userId);
+        await getAudit().emit({
+          action: 'control.emergency_stopped',
+          outcome: result.failed === 0 ? 'success' : result.paused > 0 ? 'partial' : 'failure',
+          userId,
+          target: { type: 'execution_state', id: userId },
+          tags: ['emergency_stop'],
+          details: { scope: 'workspace', via: 'kill_switch', ...result },
+        });
+        return reply.send({ ok: result.failed === 0, ...result });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Manual override: pause all platform campaigns under a single Proba goal.
   fastify.post<{ Params: { goalId: string } }>(
     '/goals/:goalId/pause',

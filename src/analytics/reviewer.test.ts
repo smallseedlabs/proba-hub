@@ -6,7 +6,8 @@ const H = 3_600_000;
 const bounds = reviewBoundsFrom({ minCheckHours: 6, maxCheckHours: 72, maxAutoChangePct: 20 });
 
 describe('reviewer bounds are tighten-only', () => {
-  it('replaces looser values with the gateway locks', () => {
+  it('replaces looser values with the gateway locks ([1h, 72h])', () => {
+    expect(REVIEW_LOCKS.maxCheckHours).toBe(72);
     expect(reviewBoundsFrom({ minCheckHours: 0.1, maxCheckHours: 1000, maxAutoChangePct: 90 })).toEqual({ ...REVIEW_LOCKS });
     expect(reviewBoundsFrom({ minCheckHours: 100, maxCheckHours: 50 })).toMatchObject({ minCheckHours: 50, maxCheckHours: 50 });
   });

@@ -33,7 +33,8 @@ export const migrations: Migration[] = [
   { id: 14, name: 'creative_assets', file: '014_creative_assets.sql' },
   { id: 15, name: 'creative_assets_merchandising', file: '015_creative_assets_merchandising.sql' },
   { id: 16, name: 'goal_creative_variants', file: '016_goal_creative_variants.sql' },
-  { id: 17, name: 'paid_actions', file: '017_paid_actions.sql' },
+  { id: 17, name: 'approval_tokens', file: '017_approval_tokens.sql' },
+  { id: 18, name: 'paid_actions', file: '018_paid_actions.sql' },
 ];
 
 async function ensureMigrationsTable(): Promise<void> {
