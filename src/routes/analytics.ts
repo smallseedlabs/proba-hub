@@ -257,6 +257,94 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // H3-05: Record a spend-gated paid action and query per-goal model/media costs.
+  fastify.post<{
+    Params: { goalId: string };
+    Body: {
+      actionType: string;
+      estimatedCostUsd: number;
+      justification: string;
+      evidence: string;
+    };
+  }>(
+    '/goals/:goalId/paid-actions',
+    {
+      onRequest: [fastify.authenticate],
+      schema: {
+        params: { type: 'object', properties: { goalId: uuid } },
+        body: {
+          type: 'object',
+          required: ['actionType', 'estimatedCostUsd', 'justification', 'evidence'],
+          properties: {
+            actionType: { type: 'string', minLength: 1, maxLength: 64 },
+            estimatedCostUsd: { type: 'number', minimum: 0 },
+            justification: { type: 'string', minLength: 1, maxLength: 64 },
+            evidence: { type: 'string', minLength: 1, maxLength: 500 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id;
+      const { goalId } = request.params;
+      const { actionType, estimatedCostUsd, justification, evidence } = request.body;
+      const owned = await pool.query<{ id: string }>(
+        'SELECT id FROM goals WHERE id = $1 AND user_id = $2',
+        [goalId, userId]
+      );
+      if (owned.rows.length === 0) {
+        return reply.code(404).send({ error: 'Goal not found' });
+      }
+      const inserted = await pool.query<{
+        id: string;
+        action_type: string;
+        estimated_cost_usd: number;
+        justification: string;
+        evidence: string;
+        created_at: string;
+      }>(
+        `INSERT INTO paid_actions
+           (workspace_id, goal_id, user_id, action_type, estimated_cost_usd, justification, evidence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, action_type, estimated_cost_usd, justification, evidence, created_at`,
+        [options.workspaceId, goalId, userId, actionType, estimatedCostUsd, justification, evidence]
+      );
+      return reply.code(201).send({ paidAction: inserted.rows[0] });
+    }
+  );
+
+  fastify.get<{ Params: { goalId: string } }>(
+    '/goals/:goalId/costs',
+    {
+      onRequest: [fastify.authenticate],
+      schema: { params: { type: 'object', properties: { goalId: uuid } } },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id;
+      const { goalId } = request.params;
+      const sumRes = await pool.query<{ total_usd: string | number; count: string | number }>(
+        `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total_usd, COUNT(*)::int AS count
+         FROM paid_actions
+         WHERE goal_id = $1 AND user_id = $2`,
+        [goalId, userId]
+      );
+      const actionsRes = await pool.query(
+        `SELECT id, action_type, estimated_cost_usd, justification, evidence, created_at
+         FROM paid_actions
+         WHERE goal_id = $1 AND user_id = $2
+         ORDER BY created_at DESC
+         LIMIT 50`,
+        [goalId, userId]
+      );
+      return reply.send({
+        goalId,
+        totalUsd: Number(sumRes.rows[0]?.total_usd ?? 0),
+        count: Number(sumRes.rows[0]?.count ?? 0),
+        actions: actionsRes.rows,
+      });
+    }
+  );
+
   // Manual override: pause all live platform campaigns in the workspace (idempotent kill-switch).
   fastify.post(
     '/kill-switch',
