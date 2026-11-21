@@ -11,6 +11,14 @@ import type { CommandResult } from '../types.js';
 import { getAudit } from '../audit/service.js';
 import { TRACE_HEADER, bindTraceId, currentTrace } from '../audit/trace.js';
 import type { PoolClient } from 'pg';
+import {
+  isSpendAsk,
+  mintApprovalToken,
+  verifyAndConsumeApprovalToken,
+  type SpendAskRow,
+} from '../auth/approval-token.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface CommandRoutesOptions {
   processor: CommandProcessor;
@@ -119,6 +127,79 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
         }
       }
 
+      // Read approvalToken from raw body before protocol Zod stripping so it works
+      // regardless of whether the installed @smallseedlabs/proba-protocol includes it.
+      const rawApprovalToken = (
+        body as { payload?: { approvalToken?: unknown } } | null
+      )?.payload?.approvalToken;
+
+      if (envelope.type === 'answer_ask') {
+        const answerPayload = envelope.payload as { askId?: string; choice?: string };
+        if (answerPayload.choice === 'approve' && answerPayload.askId) {
+          const askResult = await pool.query<SpendAskRow>(
+            `SELECT a.id, a.ask_type, a.risk, a.cost_effect
+             FROM asks a
+             JOIN threads t ON t.id = a.thread_id
+             WHERE a.id = $1 AND t.user_id = $2`,
+            [answerPayload.askId, userId]
+          );
+          const askRow = askResult.rows[0];
+          if (askRow && isSpendAsk(askRow)) {
+            const verification = await verifyAndConsumeApprovalToken(pool, {
+              token: rawApprovalToken,
+              askId: askRow.id,
+              userId,
+            });
+            if (!verification.ok) {
+              await transaction(async (client) => {
+                const received = await audit.emit(
+                  {
+                    action: 'command.received',
+                    outcome: 'success',
+                    root: true,
+                    userId,
+                    threadId: envelope.threadId,
+                    details: baseDetails,
+                  },
+                  { tx: client }
+                );
+                const parentSpanId = received?.spanId;
+                await audit.emit(
+                  {
+                    action: 'approval.rejected',
+                    outcome: 'denied',
+                    userId,
+                    threadId: envelope.threadId,
+                    target: { type: 'ask', id: askRow.id },
+                    errorCode: verification.reason,
+                    parentSpanId,
+                    details: { askType: askRow.ask_type, reason: verification.reason },
+                  },
+                  { tx: client }
+                );
+                await audit.emit(
+                  {
+                    action: 'command.rejected',
+                    outcome: 'denied',
+                    userId,
+                    threadId: envelope.threadId,
+                    errorCode: verification.reason,
+                    parentSpanId,
+                    details: { ...baseDetails, reason: verification.reason },
+                  },
+                  { tx: client }
+                );
+              });
+              return reply.code(403).send({
+                status: 'rejected',
+                clientMsgId: envelope.clientMsgId,
+                reason: verification.reason,
+              });
+            }
+          }
+        }
+      }
+
       // Accept: the new thread (if any), command.received and command.accepted
       // commit together. The command itself is processed after the 202.
       envelope = await transaction(async (client: PoolClient) => {
@@ -223,6 +304,29 @@ export async function commandRoutes(fastify: FastifyInstance, opts: CommandRoute
         status: 'accepted',
         clientMsgId: envelope.clientMsgId,
       });
+    }
+  );
+
+  fastify.post<{ Params: { askId: string } }>(
+    '/asks/:askId/approval-token',
+    {
+      onRequest: [fastify.authenticate],
+    },
+    async (request, reply) => {
+      const { askId } = request.params;
+      if (!UUID_RE.test(askId)) {
+        return reply.code(400).send({ error: 'Invalid askId' });
+      }
+
+      const minted = await mintApprovalToken(pool, {
+        askId,
+        userId: request.user!.id,
+      });
+      if (!minted) {
+        return reply.code(404).send({ error: 'Ask not found' });
+      }
+
+      return reply.code(200).send(minted);
     }
   );
 }
