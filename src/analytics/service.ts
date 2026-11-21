@@ -290,8 +290,8 @@ export class AnalyticsService {
       const inserted = await client.query(
         `INSERT INTO analytics_campaigns
            (workspace_id, user_id, proba_campaign_id, goal_id, thread_id, platform, account_id,
-            provider_campaign_id, current_daily_budget, currency, rules)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            provider_campaign_id, current_daily_budget, currency, rules, review_enabled, next_check_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,NOW() + interval '1 hour')
          ON CONFLICT (workspace_id, user_id, proba_campaign_id) DO NOTHING
          RETURNING *`,
         [
@@ -348,7 +348,7 @@ export class AnalyticsService {
     const row = await transaction(async (client) => {
       const updated = await client.query(
         `UPDATE analytics_campaigns SET
-           review_enabled = COALESCE($4, review_enabled),
+           review_enabled = CASE WHEN provider_campaign_id IS NOT NULL THEN TRUE ELSE COALESCE($4, review_enabled) END,
            current_daily_budget = CASE WHEN $5::boolean THEN $6::numeric ELSE current_daily_budget END,
            rules = COALESCE($7::jsonb, rules),
            updated_at = NOW()
