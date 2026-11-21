@@ -5,7 +5,7 @@
  */
 
 /** Gateway code locks (proba-llm-gateway src/limbs/review.ts). Hub config may only narrow these. */
-export const REVIEW_LOCKS = Object.freeze({ minCheckHours: 1, maxCheckHours: 168, maxAutoChangePct: 20 });
+export const REVIEW_LOCKS = Object.freeze({ minCheckHours: 1, maxCheckHours: 72, maxAutoChangePct: 20 });
 
 export interface ReviewBounds {
   minCheckHours: number;
