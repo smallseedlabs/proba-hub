@@ -17,6 +17,7 @@ export interface CreativeDraft {
   landingPageUrl: string;
   /** Validated image from the operator's landing page (accepted img-* research source). */
   imageUrl?: string;
+  ctaType?: string;
   rationale?: string;
   claims: Array<{ text: string; findingId: string }>;
   researchArtifactId?: string;
@@ -62,7 +63,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** The checked draft from a gateway tool_call output; undefined when it is not a well-formed draft. */
 export function draftFromParameters(parameters: unknown): CreativeDraft | undefined {
   if (!isRecord(parameters)) return undefined;
-  const { headline, body, landingPageUrl, imageUrl, rationale, claims, researchArtifactId, researchVersion, targeting, plan } = parameters;
+  const { headline, body, landingPageUrl, imageUrl, ctaType, rationale, claims, researchArtifactId, researchVersion, targeting, plan } = parameters;
   if (typeof headline !== 'string' || typeof body !== 'string' || typeof landingPageUrl !== 'string') return undefined;
   const parsed = parseApprovedCreative({ type: 'TEXT', headline, body });
   if (!parsed.ok) return undefined;
@@ -84,6 +85,7 @@ export function draftFromParameters(parameters: unknown): CreativeDraft | undefi
     body: (parsed.creative as { body: string }).body,
     landingPageUrl,
     ...(validatedImageUrl ? { imageUrl: validatedImageUrl } : {}),
+    ...(typeof ctaType === 'string' && ctaType.trim() ? { ctaType: ctaType.trim().slice(0, 64) } : {}),
     ...(typeof rationale === 'string' && rationale.trim() ? { rationale: rationale.trim().slice(0, 1000) } : {}),
     claims: cleanClaims,
     ...(typeof researchArtifactId === 'string' ? { researchArtifactId: researchArtifactId.slice(0, 64) } : {}),
@@ -143,7 +145,13 @@ export function creativeFromDraftAnswer(
   const removedImage = values?.useImage === false || values?.imageUrl === '' || values?.imageUrl === null;
   const keepImage = Boolean(draft.imageUrl) && !removedImage;
   const parsed = keepImage
-    ? parseApprovedCreative({ type: 'IMAGE', headline, body, mediaUrl: draft.imageUrl })
+    ? parseApprovedCreative({
+        type: 'IMAGE',
+        headline,
+        body,
+        mediaUrl: draft.imageUrl,
+        ...(draft.ctaType ? { callToAction: draft.ctaType } : {}),
+      })
     : parseApprovedCreative({ type: 'TEXT', headline, body });
   if (!parsed.ok) return parsed;
   const p = parsed.creative as { headline: string; body?: string };
