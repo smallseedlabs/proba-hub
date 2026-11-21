@@ -192,6 +192,16 @@ export interface CommandProcessorOptions {
   onEmergencyStop?: (userId: string) => Promise<unknown>;
 }
 
+function canonicalLandingUrl(value: string): string {
+  const parsed = parseLandingPageUrl(value);
+  const raw = parsed.ok ? parsed.url : value.trim();
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return raw;
+  }
+}
+
 export class CommandProcessor {
   private readonly bridge: ContextBridgeRuntime | null;
   private readonly onEmergencyStop?: (userId: string) => Promise<unknown>;
@@ -1343,7 +1353,7 @@ export class CommandProcessor {
     if (output.type === 'tool_call' && output.tool === CREATIVE_DRAFT_VERB && eventEnvelope.type === 'ask') {
       creativeDraft = draftFromParameters(output.parameters);
       if (!creativeDraft) throw new Error('creative.draft_post output is not a checked draft');
-      if (expectedLandingPageUrl && creativeDraft.landingPageUrl !== expectedLandingPageUrl) {
+      if (expectedLandingPageUrl && canonicalLandingUrl(creativeDraft.landingPageUrl) !== canonicalLandingUrl(expectedLandingPageUrl)) {
         throw new Error('creative.draft_post landing URL does not match the operator-entered URL');
       }
       decorateCreativeDraftAsk(eventEnvelope as unknown as DraftAskEnvelope, creativeDraft);
@@ -1413,14 +1423,8 @@ export class CommandProcessor {
         'research.accept snapshot is not a sourced research_review; Context packets are not research and citations were not invented'
       );
     }
-    if (expectedLandingPageUrl) {
-      const actualParsed = parseLandingPageUrl(research.landingPageUrl);
-      const expectedParsed = parseLandingPageUrl(expectedLandingPageUrl);
-      const actualUrl = actualParsed.ok ? actualParsed.url : research.landingPageUrl;
-      const expectedUrl = expectedParsed.ok ? expectedParsed.url : expectedLandingPageUrl;
-      if (actualUrl !== expectedUrl) {
-        throw new Error('research.accept landing URL does not match the operator-entered URL');
-      }
+    if (expectedLandingPageUrl && canonicalLandingUrl(research.landingPageUrl) !== canonicalLandingUrl(expectedLandingPageUrl)) {
+      throw new Error('research.accept landing URL does not match the operator-entered URL');
     }
     const askId = askIdFromBrainOutput(output);
     if (!askId) {
