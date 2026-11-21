@@ -143,18 +143,24 @@ export function creativeFromDraftAnswer(
   const headline = typeof values?.headline === 'string' ? values.headline : draft.headline;
   const body = typeof values?.body === 'string' ? values.body : draft.body;
   const removedImage = values?.useImage === false || values?.imageUrl === '' || values?.imageUrl === null;
-  const keepImage = Boolean(draft.imageUrl) && !removedImage;
+  const mediaUrl = typeof values?.imageUrl === 'string' && values.imageUrl.trim() ? values.imageUrl.trim() : draft.imageUrl;
+  const keepImage = Boolean(mediaUrl) && !removedImage;
+  const cta = typeof values?.ctaType === 'string' && values.ctaType.trim() ? values.ctaType.trim() : draft.ctaType;
   const parsed = keepImage
     ? parseApprovedCreative({
         type: 'IMAGE',
         headline,
         body,
-        mediaUrl: draft.imageUrl,
-        ...(draft.ctaType ? { callToAction: draft.ctaType } : {}),
+        mediaUrl,
+        ...(cta ? { callToAction: cta } : {}),
       })
     : parseApprovedCreative({ type: 'TEXT', headline, body });
   if (!parsed.ok) return parsed;
   const p = parsed.creative as { headline: string; body?: string };
-  const edited = p.headline !== draft.headline || (p.body ?? '') !== draft.body || (Boolean(draft.imageUrl) && removedImage);
+  const edited =
+    p.headline !== draft.headline ||
+    (p.body ?? '') !== draft.body ||
+    (Boolean(draft.imageUrl) && removedImage) ||
+    (Boolean(cta) && cta !== draft.ctaType);
   return { ok: true, creative: parsed.creative, edited };
 }
