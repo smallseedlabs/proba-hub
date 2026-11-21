@@ -25,6 +25,7 @@ import {
   buildResearchReviewAskEvent,
   evaluateResearchReviewAnswer,
   mapBrainOutputToEvent,
+  parseLandingPageUrl,
   validateResearchReviewAsk,
 } from '@smallseedlabs/proba-protocol';
 import { researchReviewFromBrainOutput } from '../brain/research-snapshot.js';
@@ -1412,8 +1413,14 @@ export class CommandProcessor {
         'research.accept snapshot is not a sourced research_review; Context packets are not research and citations were not invented'
       );
     }
-    if (expectedLandingPageUrl && research.landingPageUrl !== expectedLandingPageUrl) {
-      throw new Error('research.accept landing URL does not match the operator-entered URL');
+    if (expectedLandingPageUrl) {
+      const actualParsed = parseLandingPageUrl(research.landingPageUrl);
+      const expectedParsed = parseLandingPageUrl(expectedLandingPageUrl);
+      const actualUrl = actualParsed.ok ? actualParsed.url : research.landingPageUrl;
+      const expectedUrl = expectedParsed.ok ? expectedParsed.url : expectedLandingPageUrl;
+      if (actualUrl !== expectedUrl) {
+        throw new Error('research.accept landing URL does not match the operator-entered URL');
+      }
     }
     const askId = askIdFromBrainOutput(output);
     if (!askId) {
