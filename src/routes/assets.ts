@@ -216,6 +216,7 @@ export async function internalAssetRoutes(fastify: FastifyInstance, options: Int
     { onRequest: [authorizeInternal] },
     async (request, reply) => {
       const schema = z.object({
+        workspaceId: z.string().min(1).max(128).optional(),
         goalId: z.string().uuid(),
         userId: z.string().uuid(),
         actionType: z.enum(['media_generate', 'research_paid', 'llm_call']),
@@ -232,12 +233,13 @@ export async function internalAssetRoutes(fastify: FastifyInstance, options: Int
       if (!parsed.success) {
         return reply.code(400).send({ error: 'invalid_body', message: parsed.error.issues[0]?.message });
       }
-      const { goalId, userId, actionType, estimatedCostUsd, justification, evidence } = parsed.data;
+      const { workspaceId, goalId, userId, actionType, estimatedCostUsd, justification, evidence } = parsed.data;
+      const effectiveWorkspaceId = workspaceId ?? config.audit.workspaceId ?? 'seedbed';
       const inserted = await pool.query(
-        `INSERT INTO paid_actions (goal_id, user_id, action_type, estimated_cost_usd, justification, evidence)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, goal_id, action_type, estimated_cost_usd, justification, created_at`,
-        [goalId, userId, actionType, estimatedCostUsd, justification, evidence]
+        `INSERT INTO paid_actions (workspace_id, goal_id, user_id, action_type, estimated_cost_usd, justification, evidence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, workspace_id, goal_id, action_type, estimated_cost_usd, justification, created_at`,
+        [effectiveWorkspaceId, goalId, userId, actionType, estimatedCostUsd, justification, evidence]
       );
       return reply.code(201).send({ ok: true, action: inserted.rows[0] });
     }
