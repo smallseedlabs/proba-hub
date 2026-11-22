@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { AssetService } from '../assets/service.js';
 import { config } from '../config.js';
+import { pool } from '../db/client.js';
 
 const createAssetSchema = z.object({
   id: z.string().min(4).max(128).optional(),
@@ -207,6 +208,38 @@ export async function internalAssetRoutes(fastify: FastifyInstance, options: Int
       }
       await service.markUsed(request.params.id, parsed.data.workspaceId, parsed.data.userId);
       return { ok: true };
+    }
+  );
+
+  fastify.post(
+    '/paid-actions',
+    { onRequest: [authorizeInternal] },
+    async (request, reply) => {
+      const schema = z.object({
+        goalId: z.string().uuid(),
+        userId: z.string().uuid(),
+        actionType: z.enum(['media_generate', 'research_paid', 'llm_call']),
+        estimatedCostUsd: z.number().nonnegative(),
+        justification: z.enum([
+          'no_usable_site_image',
+          'format_mismatch',
+          'existing_asset_rejected_quality',
+          'user_requested',
+        ]),
+        evidence: z.string().min(1).max(2000),
+      });
+      const parsed = schema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_body', message: parsed.error.issues[0]?.message });
+      }
+      const { goalId, userId, actionType, estimatedCostUsd, justification, evidence } = parsed.data;
+      const inserted = await pool.query(
+        `INSERT INTO paid_actions (goal_id, user_id, action_type, estimated_cost_usd, justification, evidence)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, goal_id, action_type, estimated_cost_usd, justification, created_at`,
+        [goalId, userId, actionType, estimatedCostUsd, justification, evidence]
+      );
+      return reply.code(201).send({ ok: true, action: inserted.rows[0] });
     }
   );
 }
