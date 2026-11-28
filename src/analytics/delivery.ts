@@ -41,6 +41,7 @@ export interface ResolveCampaignDeliveryInput {
 export interface CampaignDeliveryResolver {
   resolve(input: ResolveCampaignDeliveryInput): Promise<CampaignDeliveryStatus | null>;
   pauseCampaign?(input: ResolveCampaignDeliveryInput): Promise<{ ok: boolean; adsPaused: number; error?: string }>;
+  resumeCampaign?(input: ResolveCampaignDeliveryInput): Promise<{ ok: boolean; adsResumed: number; error?: string }>;
 }
 
 export interface RedditEntityRecord {
@@ -833,11 +834,27 @@ export class HubCampaignDeliveryResolver implements CampaignDeliveryResolver {
   }
 
   /**
-   * Emergency-stop pause for a live provider campaign and its ads. Clears cached delivery status.
+   * Emergency-stop or manual pause for a live provider campaign, its ad sets/groups, and its ads. Clears cached delivery status.
    */
   async pauseCampaign(input: ResolveCampaignDeliveryInput): Promise<{ ok: boolean; adsPaused: number; error?: string }> {
+    const toggled = await this.setCampaignRemoteStatus(input, 'PAUSED');
+    return { ok: toggled.ok, adsPaused: toggled.adsToggled, ...(toggled.error ? { error: toggled.error } : {}) };
+  }
+
+  /**
+   * Activate / resume a provider campaign, its ad sets/groups, and its ads so real impressions deliver. Clears cached delivery status.
+   */
+  async resumeCampaign(input: ResolveCampaignDeliveryInput): Promise<{ ok: boolean; adsResumed: number; error?: string }> {
+    const toggled = await this.setCampaignRemoteStatus(input, 'ACTIVE');
+    return { ok: toggled.ok, adsResumed: toggled.adsToggled, ...(toggled.error ? { error: toggled.error } : {}) };
+  }
+
+  private async setCampaignRemoteStatus(
+    input: ResolveCampaignDeliveryInput,
+    targetStatus: 'ACTIVE' | 'PAUSED'
+  ): Promise<{ ok: boolean; adsToggled: number; error?: string }> {
     if (!input.providerCampaignId || !this.options.connections || (input.platform !== 'reddit' && input.platform !== 'meta')) {
-      return { ok: false, adsPaused: 0, error: 'unsupported_or_missing_campaign' };
+      return { ok: false, adsToggled: 0, error: 'unsupported_or_missing_campaign' };
     }
     const cacheKey = `${input.workspaceId}:${input.platform}:${input.providerCampaignId}`;
     this.cache.delete(cacheKey);
@@ -850,40 +867,88 @@ export class HubCampaignDeliveryResolver implements CampaignDeliveryResolver {
         initiatedBy: 'user',
       });
       if (input.platform === 'meta') {
-        const res = await this.fetchImpl(
+        const headers = {
+          authorization: `Bearer ${issued.accessToken}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        };
+        const campRes = await this.fetchImpl(
           `${META_GRAPH_API_BASE}/${encodeURIComponent(input.providerCampaignId)}`,
           {
             method: 'POST',
-            headers: {
-              authorization: `Bearer ${issued.accessToken}`,
-              'content-type': 'application/json',
-              accept: 'application/json',
-            },
-            body: JSON.stringify({ status: 'PAUSED' }),
+            headers,
+            body: JSON.stringify({ status: targetStatus }),
             redirect: 'error',
             signal: AbortSignal.timeout(this.timeoutMs),
           }
         );
-        return { ok: res.ok, adsPaused: res.ok ? 1 : 0 };
+        if (!campRes.ok) {
+          return { ok: false, adsToggled: 0, error: `Meta campaign ${targetStatus.toLowerCase()} returned ${campRes.status}` };
+        }
+        const [adSetsRes, adsRes] = await Promise.all([
+          this.fetchImpl(
+            `${META_GRAPH_API_BASE}/${encodeURIComponent(input.providerCampaignId)}/adsets?fields=id&limit=25`,
+            { method: 'GET', headers: { authorization: headers.authorization, accept: headers.accept }, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs) }
+          ).catch(() => null),
+          this.fetchImpl(
+            `${META_GRAPH_API_BASE}/${encodeURIComponent(input.providerCampaignId)}/ads?fields=id&limit=25`,
+            { method: 'GET', headers: { authorization: headers.authorization, accept: headers.accept }, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs) }
+          ).catch(() => null),
+        ]);
+        const adSets = adSetsRes?.ok ? (((await adSetsRes.json().catch(() => null)) as { data?: Array<{ id?: string }> } | null)?.data ?? []) : [];
+        const ads = adsRes?.ok ? (((await adsRes.json().catch(() => null)) as { data?: Array<{ id?: string }> } | null)?.data ?? []) : [];
+        for (const adSet of adSets) {
+          if (!adSet.id) continue;
+          await this.fetchImpl(`${META_GRAPH_API_BASE}/${encodeURIComponent(adSet.id)}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ status: targetStatus }),
+            redirect: 'error',
+            signal: AbortSignal.timeout(this.timeoutMs),
+          }).catch(() => null);
+        }
+        let adsToggled = 0;
+        for (const ad of ads) {
+          if (!ad.id) continue;
+          const adToggleRes = await this.fetchImpl(`${META_GRAPH_API_BASE}/${encodeURIComponent(ad.id)}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ status: targetStatus }),
+            redirect: 'error',
+            signal: AbortSignal.timeout(this.timeoutMs),
+          }).catch(() => null);
+          if (adToggleRes?.ok) adsToggled += 1;
+        }
+        return { ok: true, adsToggled: Math.max(1, adsToggled) };
       }
+
       const campRes = await this.patchObject(
         issued.accessToken,
         `/campaigns/${encodeURIComponent(input.providerCampaignId)}`,
-        { data: { configured_status: 'PAUSED' } }
+        { data: { configured_status: targetStatus } }
       );
       const accountId = input.accountId || issued.accountId;
-      const adsList = await this.getList(issued.accessToken, `/ad_accounts/${encodeURIComponent(accountId)}/ads`);
+      const [adGroupsList, adsList] = await Promise.all([
+        this.getList(issued.accessToken, `/ad_accounts/${encodeURIComponent(accountId)}/ad_groups`),
+        this.getList(issued.accessToken, `/ad_accounts/${encodeURIComponent(accountId)}/ads`),
+      ]);
+      const matchingGroups = adGroupsList.filter((g) => String(g.campaign_id ?? '') === input.providerCampaignId && g.id);
+      for (const group of matchingGroups) {
+        await this.patchObject(issued.accessToken, `/ad_groups/${encodeURIComponent(String(group.id))}`, {
+          data: { configured_status: targetStatus },
+        });
+      }
       const matchingAds = adsList.filter((ad) => String(ad.campaign_id ?? '') === input.providerCampaignId && ad.id);
-      let adsPaused = 0;
+      let adsToggled = 0;
       for (const ad of matchingAds) {
         const ok = await this.patchObject(issued.accessToken, `/ads/${encodeURIComponent(String(ad.id))}`, {
-          data: { configured_status: 'PAUSED' },
+          data: { configured_status: targetStatus },
         });
-        if (ok) adsPaused += 1;
+        if (ok) adsToggled += 1;
       }
-      return { ok: campRes, adsPaused };
+      return { ok: campRes, adsToggled };
     } catch (err) {
-      return { ok: false, adsPaused: 0, error: err instanceof Error ? err.message : 'pause_failed' };
+      return { ok: false, adsToggled: 0, error: err instanceof Error ? err.message : `${targetStatus.toLowerCase()}_failed` };
     }
   }
 

@@ -385,6 +385,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
     }
   );
 
+  // Manual override: activate / resume all platform campaigns under a single Proba goal.
+  fastify.post<{ Params: { goalId: string } }>(
+    '/goals/:goalId/resume',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { goalId: uuid } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.resumeGoalCampaigns(request.user!.id, request.params.goalId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Manual override: cancel an entire goal (stops campaigns, pending proposals, and scheduled reviews while preserving history).
   fastify.post<{ Params: { goalId: string } }>(
     '/goals/:goalId/cancel',
@@ -409,6 +424,21 @@ export async function analyticsRoutes(fastify: FastifyInstance, options: Analyti
       if (!service) return;
       try {
         return reply.send(await service.pauseSingleCampaign(request.user!.id, request.params.campaignId));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  // Manual override: activate / resume one specific platform campaign under a Proba goal.
+  fastify.post<{ Params: { campaignId: string } }>(
+    '/campaigns/:campaignId/resume',
+    { onRequest: [fastify.authenticate], schema: { params: { type: 'object', properties: { campaignId: { type: 'string', minLength: 1 } } } } },
+    async (request, reply) => {
+      const service = need(reply);
+      if (!service) return;
+      try {
+        return reply.send(await service.resumeSingleCampaign(request.user!.id, request.params.campaignId));
       } catch (error) {
         return sendError(reply, error);
       }

@@ -62,6 +62,7 @@ export class AnalyticsError extends Error {
 
 export interface AnalyticsCampaign {
   probaCampaignId: string;
+  campaignName: string | null;
   goalId: string;
   threadId: string;
   platform: AdPlatform;
@@ -88,6 +89,7 @@ export interface GoalStatus {
     state: 'no_campaign' | 'awaiting_approval' | 'running';
     campaigns: Array<{
       probaCampaignId: string;
+      campaignName?: string | null;
       platform: string;
       accountId: string | null;
       providerCampaignId: string | null;
@@ -175,6 +177,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function campaignRow(row: Record<string, unknown>): AnalyticsCampaign {
   return {
     probaCampaignId: String(row.proba_campaign_id),
+    campaignName: typeof row.campaign_name === 'string' && row.campaign_name.trim() ? row.campaign_name.trim() : null,
     goalId: String(row.goal_id),
     threadId: String(row.thread_id),
     platform: row.platform as AdPlatform,
@@ -516,6 +519,18 @@ export class AnalyticsService {
       return { ...reviewRow(existing.rows[0]), coalesced: true };
     }
     const review = reviewRow(inserted.rows[0]);
+    const deliveryStatus = this.options.delivery
+      ? await this.options.delivery
+          .resolve({
+            workspaceId: this.workspaceId,
+            userId,
+            probaCampaignId: campaign.probaCampaignId,
+            platform: campaign.platform,
+            accountId: campaign.accountId,
+            providerCampaignId: campaign.providerCampaignId,
+          })
+          .catch(() => null)
+      : null;
 
     const request: GatewayRunRequest = {
       traceId: randomUUID(),
@@ -534,9 +549,11 @@ export class AnalyticsService {
         payload: {
           text: `analytics review (${opts.trigger})`,
           probaCampaignId,
+          ...(campaign.campaignName ? { campaignName: campaign.campaignName } : {}),
           platform: campaign.platform,
           ...(campaign.accountId ? { accountId: campaign.accountId } : {}),
           ...(campaign.providerCampaignId ? { providerCampaignId: campaign.providerCampaignId } : {}),
+          ...(deliveryStatus ? { deliveryStatus } : {}),
           reviewIntent: intent,
           ...(intent === 'propose_cap'
             ? {
@@ -979,6 +996,40 @@ export class AnalyticsService {
           .catch(() => null)
       : null;
 
+    // Fetch sibling experiment cells under the same goal so the Brain Reviewer can compare multi-cell performance head-to-head.
+    const siblingRows = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3 AND proba_campaign_id <> $4 ORDER BY created_at`,
+        [this.workspaceId, userId, campaign.goalId, probaCampaignId]
+      )
+    ).rows.map(campaignRow);
+    const peerCampaigns = await Promise.all(
+      siblingRows.map(async (sib) => {
+        const sibDelivery = this.options.delivery
+          ? await this.options.delivery
+              .resolve({
+                workspaceId: this.workspaceId,
+                userId,
+                probaCampaignId: sib.probaCampaignId,
+                platform: sib.platform,
+                accountId: sib.accountId,
+                providerCampaignId: sib.providerCampaignId,
+              })
+              .catch(() => null)
+          : null;
+        return {
+          probaCampaignId: sib.probaCampaignId,
+          ...(sib.campaignName ? { campaignName: sib.campaignName } : {}),
+          platform: sib.platform,
+          currentDailyBudget: sib.currentDailyBudget,
+          currency: sib.currency,
+          deliveryState: sibDelivery?.state ?? null,
+          deliveryLabel: sibDelivery?.label ?? null,
+          nativeMetrics: sibDelivery?.nativeMetrics ?? null,
+        };
+      })
+    );
+
     const request: GatewayRunRequest = {
       traceId: randomUUID(),
       workspaceId: this.workspaceId,
@@ -996,10 +1047,12 @@ export class AnalyticsService {
         payload: {
           text: `campaign review (${opts.trigger}${wakeEvent ? `: ${wakeEvent}` : ''})`,
           probaCampaignId,
+          ...(campaign.campaignName ? { campaignName: campaign.campaignName } : {}),
           platform: campaign.platform,
           ...(campaign.accountId ? { accountId: campaign.accountId } : {}),
           ...(campaign.providerCampaignId ? { providerCampaignId: campaign.providerCampaignId } : {}),
           ...(deliveryStatus ? { deliveryStatus } : {}),
+          ...(peerCampaigns.length > 0 ? { peerCampaigns } : {}),
           reviewIntent: 'brain',
           reviewTrigger: opts.trigger,
           ...(wakeEvent ? { wakeEvent } : {}),
@@ -1273,6 +1326,32 @@ export class AnalyticsService {
           : Promise.resolve(null)
       )
     );
+    const liveSumOf = (field: string): number | null => {
+      if (campaigns.length === 0) return null;
+      let seen = false;
+      let total = 0;
+      for (const d of deliveries) {
+        const v = d?.nativeMetrics?.[field];
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          seen = true;
+          total += v;
+        } else {
+          return null;
+        }
+      }
+      return seen ? total : null;
+    };
+    const effectiveSpent = spent ?? liveSumOf('spend');
+    const effectiveClicks = clicks ?? liveSumOf('clicks');
+    const effectiveImpressions = impressions ?? liveSumOf('impressions');
+    const effectiveConversions = conversions ?? liveSumOf('conversions');
+    const effectiveActual =
+      actual ??
+      (metric === 'clicks' ? effectiveClicks
+      : metric === 'conversions' || metric === 'signups' ? effectiveConversions
+      : metric === 'ctr' ? (effectiveClicks !== null && effectiveImpressions ? effectiveClicks / effectiveImpressions : null)
+      : metric === 'cpc' ? (effectiveSpent !== null && effectiveClicks ? effectiveSpent / effectiveClicks : null)
+      : null);
     return {
       goal: { id: String(g.id), title: String(g.title), status: String(g.status) },
       plan,
@@ -1280,6 +1359,7 @@ export class AnalyticsService {
         state: campaigns.length === 0 ? 'no_campaign' : pending > 0 ? 'awaiting_approval' : 'running',
         campaigns: campaigns.map((c, idx) => ({
           probaCampaignId: c.probaCampaignId,
+          ...(c.campaignName ? { campaignName: c.campaignName } : {}),
           platform: c.platform,
           accountId: c.accountId,
           providerCampaignId: c.providerCampaignId,
@@ -1293,7 +1373,7 @@ export class AnalyticsService {
       },
       next: nextRow ? { checkAt: nextRow.nextCheckAt!, reason: nextRow.nextCheckReason, probaCampaignId: nextRow.probaCampaignId } : null,
       spend: {
-        spent,
+        spent: effectiveSpent,
         dailyCap,
         totalCap: typeof budget.total === 'number' ? budget.total : null,
         currency: campaigns.find((c) => c.currency)?.currency ?? (typeof budget.currency === 'string' ? budget.currency : null),
@@ -1301,7 +1381,7 @@ export class AnalyticsService {
       progress: {
         metric,
         target: typeof plan?.successTarget === 'number' ? plan.successTarget : null,
-        actual,
+        actual: effectiveActual,
         checkpointsDone: [...new Set(campaigns.flatMap((c) => c.checkpointsDone))],
       },
       decisions,
@@ -1331,7 +1411,38 @@ export class AnalyticsService {
         [this.workspaceId, userId, goalId]
       )
     ).rows.map(campaignRow);
-    return this.pauseCampaignList(userId, campaigns, 'manual_goal_pause');
+    const res = await this.pauseCampaignList(userId, campaigns, 'manual_goal_pause');
+    if (res.paused > 0) {
+      await pool.query(`UPDATE goals SET status = 'paused', updated_at = now() WHERE id = $1 AND user_id = $2 AND status = 'active'`, [
+        goalId,
+        userId,
+      ]);
+    }
+    return res;
+  }
+
+  /**
+   * Activate / resume every platform campaign belonging to one Proba goal owned by `userId`.
+   */
+  async resumeGoalCampaigns(userId: string, goalId: string): Promise<{ resumed: number; failed: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3 AND provider_campaign_id IS NOT NULL`,
+        [this.workspaceId, userId, goalId]
+      )
+    ).rows.map(campaignRow);
+    const res = await this.resumeCampaignList(userId, campaigns, 'manual_goal_resume');
+    if (res.resumed > 0) {
+      await pool.query(
+        `UPDATE analytics_campaigns SET review_enabled = TRUE, updated_at = now() WHERE workspace_id = $1 AND user_id = $2 AND goal_id = $3`,
+        [this.workspaceId, userId, goalId]
+      );
+      await pool.query(`UPDATE goals SET status = 'active', updated_at = now() WHERE id = $1 AND user_id = $2 AND status = 'paused'`, [
+        goalId,
+        userId,
+      ]);
+    }
+    return res;
   }
 
   /**
@@ -1351,6 +1462,36 @@ export class AnalyticsService {
       throw Object.assign(new Error('campaign not found'), { statusCode: 404, code: 'campaign_not_found' });
     }
     return this.pauseCampaignList(userId, campaigns, 'manual_platform_pause');
+  }
+
+  /**
+   * Activate / resume a single platform campaign owned by `userId`.
+   */
+  async resumeSingleCampaign(
+    userId: string,
+    probaCampaignId: string
+  ): Promise<{ resumed: number; failed: number }> {
+    const campaigns = (
+      await pool.query(
+        `SELECT * FROM analytics_campaigns WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3 AND provider_campaign_id IS NOT NULL`,
+        [this.workspaceId, userId, probaCampaignId]
+      )
+    ).rows.map(campaignRow);
+    if (campaigns.length === 0) {
+      throw Object.assign(new Error('campaign not found'), { statusCode: 404, code: 'campaign_not_found' });
+    }
+    const res = await this.resumeCampaignList(userId, campaigns, 'manual_platform_resume');
+    if (res.resumed > 0) {
+      await pool.query(
+        `UPDATE analytics_campaigns SET review_enabled = TRUE, updated_at = now() WHERE workspace_id = $1 AND user_id = $2 AND proba_campaign_id = $3`,
+        [this.workspaceId, userId, probaCampaignId]
+      );
+      await pool.query(
+        `UPDATE goals SET status = 'active', updated_at = now() WHERE id = $1 AND user_id = $2 AND status = 'paused'`,
+        [campaigns[0]!.goalId, userId]
+      );
+    }
+    return res;
   }
 
   /**
@@ -1538,6 +1679,53 @@ export class AnalyticsService {
       }
     }
     return { paused, failed };
+  }
+
+  private async resumeCampaignList(
+    userId: string,
+    campaigns: AnalyticsCampaign[],
+    reasonTag: 'manual_goal_resume' | 'manual_platform_resume'
+  ): Promise<{ resumed: number; failed: number }> {
+    const resumeFn = this.options.delivery?.resumeCampaign?.bind(this.options.delivery);
+    if (!resumeFn) return { resumed: 0, failed: 0 };
+    let resumed = 0;
+    let failed = 0;
+    for (const c of campaigns) {
+      const res = await resumeFn({
+        workspaceId: this.workspaceId,
+        userId,
+        probaCampaignId: c.probaCampaignId,
+        platform: c.platform,
+        accountId: c.accountId,
+        providerCampaignId: c.providerCampaignId,
+      });
+      if (res.ok) {
+        resumed += 1;
+        await this.options.audit.emit(
+          {
+            action: 'campaign.resumed',
+            outcome: 'success',
+            userId,
+            workspaceId: this.workspaceId,
+            goalId: c.goalId,
+            threadId: c.threadId,
+            target: { type: 'campaign', id: c.probaCampaignId },
+            tags: [reasonTag],
+            details: {
+              probaCampaignId: c.probaCampaignId,
+              platform: c.platform,
+              providerCampaignId: c.providerCampaignId,
+              adsResumed: res.adsResumed,
+              manualOverride: true,
+            },
+          },
+          { bestEffort: true }
+        );
+      } else {
+        failed += 1;
+      }
+    }
+    return { resumed, failed };
   }
 
   // ---------------------------------------------------------------- helpers

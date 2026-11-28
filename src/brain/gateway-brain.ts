@@ -117,22 +117,25 @@ export class GatewayBrain extends BaseBrainPort implements BrainPort {
       'gateway run finished'
     );
 
-    if (
-      this.options.onCampaignCreated &&
-      snapshot.actionOutcome &&
-      snapshot.actionOutcome.verb === 'ads.create_campaign' &&
-      snapshot.actionOutcome.ok === true
-    ) {
-      try {
-        await this.options.onCampaignCreated({
-          workspaceId,
-          userId,
-          goalId: goalId ?? pending?.goalId,
-          threadId: threadId ?? pending?.threadId,
-          outcome: snapshot.actionOutcome,
-        });
-      } catch (err) {
-        logger.warn({ err, userId, threadId, runId: snapshot.runId }, 'failed to auto-register analytics campaign');
+    if (this.options.onCampaignCreated && snapshot.actionOutcome) {
+      const rawBatch = Array.isArray(snapshot.actionOutcome.createdCampaigns)
+        ? (snapshot.actionOutcome.createdCampaigns as Array<Record<string, unknown>>)
+        : snapshot.actionOutcome.verb === 'ads.create_campaign' && snapshot.actionOutcome.ok === true
+          ? [snapshot.actionOutcome]
+          : [];
+      for (const item of rawBatch) {
+        if (!item || typeof item !== 'object' || item.ok !== true) continue;
+        try {
+          await this.options.onCampaignCreated({
+            workspaceId,
+            userId,
+            goalId: goalId ?? pending?.goalId,
+            threadId: threadId ?? pending?.threadId,
+            outcome: item,
+          });
+        } catch (err) {
+          logger.warn({ err, userId, threadId, runId: snapshot.runId }, 'failed to auto-register analytics campaign');
+        }
       }
     }
 

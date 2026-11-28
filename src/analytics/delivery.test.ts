@@ -246,4 +246,41 @@ describe('deriveProviderDeliveryStatus', () => {
       conversions: 50,
     });
   });
+
+  it('resumes Meta campaign, adsets, and ads to ACTIVE for live delivery', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined });
+      if (url.endsWith('/meta_cmp_1/adsets?fields=id&limit=25')) {
+        return new Response(JSON.stringify({ data: [{ id: 'meta_set_1' }] }), { status: 200 });
+      }
+      if (url.endsWith('/meta_cmp_1/ads?fields=id&limit=25')) {
+        return new Response(JSON.stringify({ data: [{ id: 'meta_ad_1' }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    });
+
+    const resolver = new HubCampaignDeliveryResolver({
+      connections: {
+        issueAccessToken: async () => ({ accessToken: 'meta_tok', accountId: 'act_123' }),
+      } as never,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const res = await resolver.resumeCampaign({
+      workspaceId: 'ws_1',
+      userId: 'u_1',
+      probaCampaignId: 'pc_meta_1',
+      platform: 'meta',
+      accountId: 'act_123',
+      providerCampaignId: 'meta_cmp_1',
+    });
+    expect(res).toEqual({ ok: true, adsResumed: 1 });
+    const postBodies = calls.filter((c) => c.method === 'POST').map((c) => ({ url: c.url, body: JSON.parse(c.body ?? '{}') }));
+    expect(postBodies).toEqual([
+      expect.objectContaining({ url: expect.stringContaining('/meta_cmp_1'), body: { status: 'ACTIVE' } }),
+      expect.objectContaining({ url: expect.stringContaining('/meta_set_1'), body: { status: 'ACTIVE' } }),
+      expect.objectContaining({ url: expect.stringContaining('/meta_ad_1'), body: { status: 'ACTIVE' } }),
+    ]);
+  });
 });

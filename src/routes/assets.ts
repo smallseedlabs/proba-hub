@@ -244,4 +244,26 @@ export async function internalAssetRoutes(fastify: FastifyInstance, options: Int
       return reply.code(201).send({ ok: true, action: inserted.rows[0] });
     }
   );
+
+  fastify.get<{ Params: { goalId: string } }>(
+    '/goals/:goalId/costs',
+    { onRequest: [authorizeInternal] },
+    async (request, reply) => {
+      const parsed = z.string().uuid().safeParse(request.params.goalId);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_goal_id' });
+      }
+      const sumRes = await pool.query<{ total_usd: string | number; count: string | number }>(
+        `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total_usd, COUNT(*)::int AS count
+         FROM paid_actions
+         WHERE goal_id = $1`,
+        [parsed.data]
+      );
+      return reply.send({
+        goalId: parsed.data,
+        totalUsd: Number(sumRes.rows[0]?.total_usd ?? 0),
+        count: Number(sumRes.rows[0]?.count ?? 0),
+      });
+    }
+  );
 }
